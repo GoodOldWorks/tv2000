@@ -1,0 +1,42 @@
+# TV2000
+
+Turn digital videos back into television.
+
+TV2000 是一个面向 Android TV 的本地视频频道播放器：U 盘一级目录会自动成为频道，应用启动后直接播放，遥控器上下键负责切台。
+
+## 当前开发状态
+
+当前垂直切片已经包含：
+
+- Android TV / Google TV 入口；
+- SAF 目录授权；
+- 一级目录频道扫描；
+- Episode 自然排序；
+- Media3 本地播放；
+- 遥控器切台、seek、双击换集、暂停；
+- Room 媒体索引与稳定频道编号；
+- 每频道播放位置保存与旧 DataStore 历史兼容。
+
+## 本地构建
+
+工程要求：
+
+- Android Studio 当前稳定版；
+- Android SDK Platform 37；
+- Android SDK Build Tools 36.0.0；
+- Android Studio 自带 JDK；
+- Android TV 9 / API 28+ 运行设备。
+
+```bash
+export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
+./gradlew testDebugUnitTest
+./gradlew connectedDebugAndroidTest
+./gradlew lintDebug
+./gradlew assembleDebug
+```
+
+详细资料：
+
+- [产品与技术规格](./docs/TV2000-SPEC.md)
+- [MVP 开发与测试计划](./docs/TV2000-MVP-DEVELOPMENT-TEST-PLAN.md)
+- [本地测试指南](./docs/TV2000-LOCAL-TESTING.md)

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">TV2000</string>
+    <string name="storage_permission_explanation">请选择 U 盘根目录；取消后可按 OK 重新授权</string>
+    <string name="scanning_usb">正在扫描 U 盘…</string>
+    <string name="select_usb">请选择 U 盘</string>
+    <string name="no_playable_content">未找到可播放的视频</string>
+    <string name="put_videos_in_directories">请将视频放入 U 盘的一级目录中</string>
+    <string name="device_removed">设备已移除</string>
+    <string name="reinsert_usb">请重新插入 U 盘，然后按 OK</string>
+    <string name="channels">频道</string>
+    <string name="already_first_episode">已经是第一集</string>
+    <string name="already_last_episode">已经是最后一集</string>
+</resources>
