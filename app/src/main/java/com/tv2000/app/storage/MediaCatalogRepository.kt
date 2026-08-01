@@ -96,25 +96,46 @@ class MediaCatalogRepository(
         return loadVisibleChannels()
     }
 
-    private suspend fun loadVisibleChannels(): List<Channel> {
+    suspend fun loadIndexedChannels(rootUri: Uri): List<Channel> {
+        val volumeId = StableMediaIds.volume(rootUri.toString())
         val dao = database.mediaCatalogDao()
-        return dao.visibleChannels().map { channel ->
-            Channel(
-                id = channel.channelId,
-                legacyId = channel.sourceUri,
-                number = channel.channelNumber,
-                name = channel.displayName,
-                episodes = dao.availableEpisodes(channel.channelId).map { episode ->
-                    Episode(
-                        id = episode.episodeId,
-                        legacyId = episode.mediaUri,
-                        title = episode.displayName,
-                        uri = Uri.parse(episode.mediaUri),
-                    )
-                },
+        return dao.visibleChannelsForVolume(volumeId).map { channel ->
+            channel.toModel(
+                episodes = dao.availableEpisodes(channel.channelId),
             )
         }
     }
+
+    suspend fun invalidateIndex(rootUri: Uri) {
+        val volumeId = StableMediaIds.volume(rootUri.toString())
+        database.mediaCatalogDao().invalidateChannelsForVolume(volumeId)
+    }
+
+    private suspend fun loadVisibleChannels(): List<Channel> {
+        val dao = database.mediaCatalogDao()
+        return dao.visibleChannels().map { channel ->
+            channel.toModel(
+                episodes = dao.availableEpisodes(channel.channelId),
+            )
+        }
+    }
+
+    private fun ChannelEntity.toModel(
+        episodes: List<EpisodeEntity>,
+    ): Channel = Channel(
+        id = channelId,
+        legacyId = sourceUri,
+        number = channelNumber,
+        name = displayName,
+        episodes = episodes.map { episode ->
+            Episode(
+                id = episode.episodeId,
+                legacyId = episode.mediaUri,
+                title = episode.displayName,
+                uri = Uri.parse(episode.mediaUri),
+            )
+        },
+    )
 
     private companion object {
         const val SORT_KEY_WIDTH = 10

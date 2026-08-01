@@ -24,6 +24,9 @@ interface MediaCatalogDao {
     @Query("UPDATE channel SET is_visible = 0")
     suspend fun markAllChannelsInvisible()
 
+    @Query("UPDATE channel SET is_visible = 0 WHERE volume_id = :volumeId")
+    suspend fun invalidateChannelsForVolume(volumeId: String)
+
     @Upsert
     suspend fun upsertChannel(channel: ChannelEntity)
 
@@ -35,6 +38,15 @@ interface MediaCatalogDao {
 
     @Query("SELECT * FROM channel WHERE is_visible = 1 ORDER BY channel_number")
     suspend fun visibleChannels(): List<ChannelEntity>
+
+    @Query(
+        """
+        SELECT * FROM channel
+        WHERE volume_id = :volumeId AND is_visible = 1
+        ORDER BY channel_number
+        """,
+    )
+    suspend fun visibleChannelsForVolume(volumeId: String): List<ChannelEntity>
 
     @Query(
         """
@@ -72,4 +84,23 @@ interface PlaybackStateDao {
 
     @Upsert
     suspend fun upsertEpisodePlayback(state: EpisodePlaybackEntity)
+
+    @Query("DELETE FROM channel_playback_state WHERE channel_id = :channelId")
+    suspend fun deleteChannelPlayback(channelId: String)
+
+    @Query(
+        """
+        DELETE FROM episode_playback
+        WHERE episode_id IN (
+            SELECT episode_id FROM episode WHERE channel_id = :channelId
+        )
+        """,
+    )
+    suspend fun deleteEpisodePlaybackForChannel(channelId: String)
+
+    @Query("DELETE FROM channel_playback_state")
+    suspend fun deleteAllChannelPlayback()
+
+    @Query("DELETE FROM episode_playback")
+    suspend fun deleteAllEpisodePlayback()
 }

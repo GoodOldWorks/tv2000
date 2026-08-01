@@ -101,6 +101,99 @@ class RoomPersistenceTest {
         )
     }
 
+    @Test
+    fun invalidatingIndexKeepsPlaybackHistory() = runBlocking {
+        val rootUri = Uri.parse("file:///storage/usb")
+        val channel = catalogRepository.replaceSnapshot(
+            rootUri,
+            listOf(scannedChannel("动画", "001.mp4")),
+        ).single()
+        val episode = channel.episodes.single()
+        val historyStore = PlaybackHistoryStore(
+            context = context,
+            database = database,
+            clock = { TEST_TIME },
+        )
+        historyStore.saveChannelPlayback(
+            channelId = channel.id,
+            episodeId = episode.id,
+            positionMs = 23_410L,
+            wasPlaying = true,
+        )
+
+        catalogRepository.invalidateIndex(rootUri)
+
+        assertTrue(catalogRepository.loadIndexedChannels(rootUri).isEmpty())
+        assertEquals(
+            23_410L,
+            historyStore.channelPlayback(channel.id)?.positionMs,
+        )
+    }
+
+    @Test
+    fun resetCurrentChannelKeepsOtherChannelHistory() = runBlocking {
+        val channels = catalogRepository.replaceSnapshot(
+            Uri.parse("file:///storage/usb"),
+            listOf(
+                scannedChannel("动画", "001.mp4"),
+                scannedChannel("西游记", "第01集.mp4"),
+            ),
+        )
+        val historyStore = PlaybackHistoryStore(
+            context = context,
+            database = database,
+            clock = { TEST_TIME },
+        )
+        channels.forEachIndexed { index, channel ->
+            historyStore.saveChannelPlayback(
+                channelId = channel.id,
+                episodeId = channel.episodes.single().id,
+                positionMs = (index + 1) * 10_000L,
+                wasPlaying = true,
+            )
+        }
+
+        historyStore.resetChannelPlayback(channels.first().id)
+
+        assertEquals(null, historyStore.channelPlayback(channels.first().id))
+        assertEquals(
+            20_000L,
+            historyStore.channelPlayback(channels.last().id)?.positionMs,
+        )
+    }
+
+    @Test
+    fun resetAllChannelsClearsEveryPlaybackHistory() = runBlocking {
+        val channels = catalogRepository.replaceSnapshot(
+            Uri.parse("file:///storage/usb"),
+            listOf(
+                scannedChannel("动画", "001.mp4"),
+                scannedChannel("西游记", "第01集.mp4"),
+            ),
+        )
+        val historyStore = PlaybackHistoryStore(
+            context = context,
+            database = database,
+            clock = { TEST_TIME },
+        )
+        channels.forEach { channel ->
+            historyStore.saveChannelPlayback(
+                channelId = channel.id,
+                episodeId = channel.episodes.single().id,
+                positionMs = 10_000L,
+                wasPlaying = true,
+            )
+        }
+
+        historyStore.resetAllPlayback()
+
+        assertTrue(
+            channels.all { channel ->
+                historyStore.channelPlayback(channel.id) == null
+            },
+        )
+    }
+
     private fun scannedChannel(
         name: String,
         episodeName: String,
