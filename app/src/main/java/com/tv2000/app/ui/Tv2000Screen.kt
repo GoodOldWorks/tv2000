@@ -15,17 +15,20 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.res.stringResource
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import androidx.tv.material3.MaterialTheme
@@ -87,12 +90,20 @@ fun Tv2000App(
                 ChannelList(state)
             }
 
-            if (state.settingsMenuVisible) {
-                SettingsMenu(state)
+            if (state.mainMenuVisible) {
+                MainMenu(state)
             }
 
-            if (state.resourceMenuVisible) {
-                ResourceMenu(state)
+            if (state.resourceSettingsVisible) {
+                ResourceManagement(state)
+            }
+
+            if (state.smbResourceActionsVisible) {
+                SmbResourceActions(state)
+            }
+
+            if (state.advancedSettingsVisible) {
+                AdvancedSettings(state)
             }
         }
     }
@@ -209,22 +220,35 @@ private fun ChannelOverlay(state: Tv2000UiState) {
                     fontWeight = FontWeight.SemiBold,
                 )
             }
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                text = state.message ?: buildString {
-                    append(episode?.title.orEmpty())
-                    if (episode != null) {
-                        append("  ·  第 ")
-                        append(state.currentEpisodeIndex + 1)
-                        append("/")
-                        append(channel.episodes.size)
-                        append(" 集  ·  ")
-                        append(formatPlaybackTime(state.channelOverlayPositionMs))
-                    }
-                },
-                color = Color(0xFFB7B1A2),
-                fontSize = 22.sp,
-            )
+            Spacer(modifier = Modifier.height(12.dp))
+            if (state.message != null) {
+                Text(
+                    text = state.message,
+                    color = Color(0xFFB7B1A2),
+                    fontSize = 22.sp,
+                )
+            } else if (episode != null) {
+                Text(
+                    text = stringResource(
+                        R.string.episode_progress,
+                        state.currentEpisodeIndex + 1,
+                        channel.episodes.size,
+                        formatPlaybackTime(state.channelOverlayPositionMs),
+                    ),
+                    color = Color(0xFFEDE7D5),
+                    fontSize = 27.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = episode.title,
+                    color = Color(0xFFB7B1A2),
+                    fontSize = 18.sp,
+                    lineHeight = 22.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
     }
 }
@@ -243,6 +267,13 @@ internal fun formatPlaybackTime(positionMs: Long): String {
 
 @Composable
 private fun ChannelList(state: Tv2000UiState) {
+    val listState = rememberLazyListState()
+    LaunchedEffect(state.channelListSelection, state.channels.size) {
+        if (state.channelListSelection in state.channels.indices) {
+            listState.animateScrollToItem(state.channelListSelection)
+        }
+    }
+
     Row(
         modifier = Modifier
             .fillMaxHeight()
@@ -259,7 +290,10 @@ private fun ChannelList(state: Tv2000UiState) {
             )
             Spacer(modifier = Modifier.height(24.dp))
             LazyColumn(
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                state = listState,
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 itemsIndexed(
@@ -290,18 +324,155 @@ private fun ChannelList(state: Tv2000UiState) {
                     }
                 }
             }
+            if (state.exitPromptVisible) {
+                Spacer(modifier = Modifier.height(18.dp))
+                Text(
+                    text = stringResource(R.string.press_back_again_to_exit),
+                    color = Color(0xFF8F8B82),
+                    fontSize = 17.sp,
+                )
+            }
         }
     }
 }
 
 @Composable
-private fun SettingsMenu(state: Tv2000UiState) {
+private fun MainMenu(state: Tv2000UiState) {
+    val items = buildList {
+        if (state.usbResourceConfigured) {
+            add(
+                resourceLabel(
+                    type = stringResource(R.string.usb_resource),
+                    name = null,
+                    active = state.activeResourceKind == ResourceKind.USB,
+                    activeLabel = stringResource(R.string.active_resource),
+                ),
+            )
+        }
+        state.smbResources.forEach { resource ->
+            add(
+                resourceLabel(
+                    type = "SMB",
+                    name = resource.name,
+                    active = state.activeResourceKind == ResourceKind.SMB &&
+                        state.activeResourceId == resource.id,
+                    activeLabel = stringResource(R.string.active_resource),
+                ),
+            )
+        }
+        add(stringResource(R.string.resource_management))
+        add(stringResource(R.string.advanced_settings))
+    }
+
+    MenuPanel(
+        title = stringResource(R.string.resources),
+        items = items,
+        selectedIndex = state.mainMenuSelection,
+    )
+}
+
+private fun resourceLabel(
+    type: String,
+    name: String?,
+    active: Boolean,
+    activeLabel: String,
+): String = buildString {
+    append(type)
+    if (!name.isNullOrBlank()) {
+        append("  ·  ")
+        append(name)
+    }
+    if (active) {
+        append("  ·  ")
+        append(activeLabel)
+    }
+}
+
+@Composable
+private fun ResourceManagement(state: Tv2000UiState) {
+    val items = buildList {
+        add(stringResource(R.string.add_remote_resource))
+        state.smbResources.forEach { resource ->
+            add(
+                resourceLabel(
+                    type = "SMB",
+                    name = resource.name,
+                    active = state.activeResourceKind == ResourceKind.SMB &&
+                        state.activeResourceId == resource.id,
+                    activeLabel = stringResource(R.string.active_resource),
+                ),
+            )
+        }
+    }
+
+    MenuPanel(
+        title = stringResource(R.string.resource_management),
+        items = items,
+        selectedIndex = state.resourceSettingsSelection,
+        note = stringResource(R.string.resource_management_note),
+    )
+}
+
+@Composable
+private fun SmbResourceActions(state: Tv2000UiState) {
+    val resource = state.smbResources.firstOrNull { summary ->
+        summary.id == state.managedSmbResourceId
+    } ?: return
+    val isActive = state.activeResourceKind == ResourceKind.SMB &&
+        state.activeResourceId == resource.id
     val items = listOf(
-        stringResource(R.string.select_resource),
+        stringResource(R.string.view_resource),
+        stringResource(R.string.edit_resource),
+        stringResource(
+            if (isActive) R.string.delete_active_resource_disabled else R.string.delete_resource,
+        ),
+    )
+
+    MenuPanel(
+        title = resource.name,
+        items = items,
+        selectedIndex = state.smbResourceActionsSelection,
+        note = stringResource(
+            if (isActive) {
+                R.string.active_resource_cannot_delete_note
+            } else {
+                R.string.resource_actions_note
+            },
+        ),
+        disabledIndices = if (isActive) setOf(2) else emptySet(),
+    )
+}
+
+@Composable
+private fun AdvancedSettings(state: Tv2000UiState) {
+    val items = listOf(
         stringResource(R.string.clear_index),
         stringResource(R.string.reset_current_channel_progress),
         stringResource(R.string.reset_all_channel_progress),
     )
+
+    MenuPanel(
+        title = stringResource(R.string.advanced_settings),
+        items = items,
+        selectedIndex = state.advancedSettingsSelection,
+        note = stringResource(R.string.settings_local_data_note),
+    )
+}
+
+@Composable
+private fun MenuPanel(
+    title: String,
+    items: List<String>,
+    selectedIndex: Int,
+    note: String? = null,
+    disabledIndices: Set<Int> = emptySet(),
+) {
+    val listState = rememberLazyListState()
+    LaunchedEffect(selectedIndex, items.size) {
+        if (selectedIndex in items.indices) {
+            listState.animateScrollToItem(selectedIndex)
+        }
+    }
 
     Box(
         modifier = Modifier
@@ -312,118 +483,55 @@ private fun SettingsMenu(state: Tv2000UiState) {
         Column(
             modifier = Modifier
                 .width(680.dp)
+                .fillMaxHeight(0.88f)
                 .background(Color(0xF20B0D10))
                 .padding(horizontal = 40.dp, vertical = 36.dp),
         ) {
             Text(
-                text = stringResource(R.string.settings),
+                text = title,
                 color = Color(0xFFEDE7D5),
                 fontSize = 32.sp,
                 fontWeight = FontWeight.Bold,
             )
             Spacer(modifier = Modifier.height(24.dp))
-            items.forEachIndexed { index, label ->
-                val selected = index == state.settingsMenuSelection
-                Text(
-                    text = label,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(
-                            if (selected) Color(0xFFEDE7D5) else Color.Transparent,
-                        )
-                        .padding(horizontal = 20.dp, vertical = 16.dp),
-                    color = if (selected) Color(0xFF111418) else Color(0xFFEDE7D5),
-                    fontSize = 26.sp,
-                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                )
-                if (index != items.lastIndex) {
-                    Spacer(modifier = Modifier.height(8.dp))
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                state = listState,
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                itemsIndexed(items) { index, label ->
+                    val selected = index == selectedIndex
+                    val disabled = index in disabledIndices
+                    Text(
+                        text = label,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(
+                                when {
+                                    selected && disabled -> Color(0xFF34373B)
+                                    selected -> Color(0xFFEDE7D5)
+                                    else -> Color.Transparent
+                                },
+                            )
+                            .padding(horizontal = 20.dp, vertical = 16.dp),
+                        color = when {
+                            disabled -> Color(0xFF777A80)
+                            selected -> Color(0xFF111418)
+                            else -> Color(0xFFEDE7D5)
+                        },
+                        fontSize = 24.sp,
+                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                    )
                 }
             }
-            Spacer(modifier = Modifier.height(24.dp))
-            Text(
-                text = stringResource(R.string.settings_local_data_note),
-                color = Color(0xFFB7B1A2),
-                fontSize = 19.sp,
-            )
-        }
-    }
-}
-
-@Composable
-private fun ResourceMenu(state: Tv2000UiState) {
-    val usbLabel = buildString {
-        append(stringResource(R.string.usb_resource))
-        if (state.activeResourceKind == ResourceKind.USB) {
-            append("  ·  ")
-            append(stringResource(R.string.active_resource))
-        }
-    }
-    val smbName = state.smbResourceName
-    val items = buildList {
-        add(usbLabel)
-        if (smbName != null) {
-            add(
-                buildString {
-                    append("SMB  ·  ")
-                    append(smbName)
-                    if (state.activeResourceKind == ResourceKind.SMB) {
-                        append("  ·  ")
-                        append(stringResource(R.string.active_resource))
-                    }
-                },
-            )
-        }
-        add(
-            stringResource(
-                if (smbName == null) R.string.add_smb_resource else R.string.edit_smb_resource,
-            ),
-        )
-    }
-
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color(0xB3000000)),
-        contentAlignment = Alignment.Center,
-    ) {
-        Column(
-            modifier = Modifier
-                .width(760.dp)
-                .background(Color(0xF20B0D10))
-                .padding(horizontal = 40.dp, vertical = 36.dp),
-        ) {
-            Text(
-                text = stringResource(R.string.resources),
-                color = Color(0xFFEDE7D5),
-                fontSize = 32.sp,
-                fontWeight = FontWeight.Bold,
-            )
-            Spacer(modifier = Modifier.height(24.dp))
-            items.forEachIndexed { index, label ->
-                val selected = index == state.resourceMenuSelection
+            if (note != null) {
+                Spacer(modifier = Modifier.height(24.dp))
                 Text(
-                    text = label,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(
-                            if (selected) Color(0xFFEDE7D5) else Color.Transparent,
-                        )
-                        .padding(horizontal = 20.dp, vertical = 16.dp),
-                    color = if (selected) Color(0xFF111418) else Color(0xFFEDE7D5),
-                    fontSize = 24.sp,
-                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                    text = note,
+                    color = Color(0xFFB7B1A2),
+                    fontSize = 19.sp,
                 )
-                if (index != items.lastIndex) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                }
             }
-            Spacer(modifier = Modifier.height(24.dp))
-            Text(
-                text = stringResource(R.string.settings_local_data_note),
-                color = Color(0xFFB7B1A2),
-                fontSize = 19.sp,
-            )
         }
     }
 }

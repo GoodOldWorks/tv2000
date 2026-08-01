@@ -54,7 +54,7 @@ class Tv2000DataSource private constructor(
     class Factory(
         context: Context,
         smbClient: SmbjMediaClient,
-        resourceProvider: () -> SmbResource?,
+        resourceProvider: (Uri) -> SmbResource?,
     ) : DataSource.Factory {
         private val defaultFactory = DefaultDataSource.Factory(context)
         private val smbFactory = SmbDataSource.Factory(smbClient, resourceProvider)
@@ -69,7 +69,7 @@ class Tv2000DataSource private constructor(
 @OptIn(UnstableApi::class)
 private class SmbDataSource(
     private val smbClient: SmbjMediaClient,
-    private val resourceProvider: () -> SmbResource?,
+    private val resourceProvider: (Uri) -> SmbResource?,
 ) : BaseDataSource(false) {
     private var openedUri: Uri? = null
     private var openedFile: SmbOpenFile? = null
@@ -79,7 +79,7 @@ private class SmbDataSource(
 
     override fun open(dataSpec: DataSpec): Long {
         transferInitializing(dataSpec)
-        val resource = resourceProvider()
+        val resource = resourceProvider(dataSpec.uri)
             ?: throw IOException("SMB resource is not configured")
         val relativePath = SmbMediaUri.relativePath(dataSpec.uri)
             ?: throw IOException("Invalid TV2000 SMB URI")
@@ -130,7 +130,7 @@ private class SmbDataSource(
 
     class Factory(
         private val smbClient: SmbjMediaClient,
-        private val resourceProvider: () -> SmbResource?,
+        private val resourceProvider: (Uri) -> SmbResource?,
     ) : DataSource.Factory {
         override fun createDataSource(): DataSource = SmbDataSource(smbClient, resourceProvider)
     }

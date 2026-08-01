@@ -13,6 +13,9 @@ data class SmbResource(
     val password: String = "",
     val domain: String = "",
 ) {
+    val id: String
+        get() = fingerprint()
+
     val displayName: String
         get() = buildString {
             append(host)
@@ -84,20 +87,31 @@ data class SmbResource(
 
 object SmbMediaUri {
     const val SCHEME = "tv2000-smb"
-    private const val AUTHORITY = "primary"
+    private const val LEGACY_AUTHORITY = "primary"
 
     fun root(resource: SmbResource): Uri = Uri.Builder()
         .scheme(SCHEME)
-        .authority(AUTHORITY)
-        .appendPath(resource.fingerprint())
+        .authority(LEGACY_AUTHORITY)
+        .appendPath(resource.id)
         .build()
 
-    fun channel(channelName: String): Uri = build(channelName)
+    fun channel(resource: SmbResource, channelName: String): Uri =
+        build(resource.id, channelName)
 
-    fun episode(channelName: String, fileName: String): Uri = build(channelName, fileName)
+    fun episode(resource: SmbResource, channelName: String, fileName: String): Uri =
+        build(resource.id, channelName, fileName)
+
+    fun resourceId(uri: Uri): String? {
+        if (uri.scheme != SCHEME) return null
+        return if (uri.authority == LEGACY_AUTHORITY) {
+            uri.pathSegments.singleOrNull()?.takeIf(String::isNotBlank)
+        } else {
+            uri.authority?.takeIf(String::isNotBlank)
+        }
+    }
 
     fun relativePath(uri: Uri): String? {
-        if (uri.scheme != SCHEME || uri.authority != AUTHORITY) return null
+        if (uri.scheme != SCHEME || uri.authority.isNullOrBlank()) return null
         return uri.pathSegments
             .map(String::trim)
             .filter(String::isNotEmpty)
@@ -107,9 +121,9 @@ object SmbMediaUri {
 
     fun isSmb(uri: Uri): Boolean = uri.scheme == SCHEME
 
-    private fun build(vararg segments: String): Uri = Uri.Builder()
+    private fun build(resourceId: String, vararg segments: String): Uri = Uri.Builder()
         .scheme(SCHEME)
-        .authority(AUTHORITY)
+        .authority(resourceId)
         .apply { segments.forEach(::appendPath) }
         .build()
 }

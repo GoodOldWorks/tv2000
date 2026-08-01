@@ -18,6 +18,8 @@ import com.tv2000.app.storage.MediaCatalogRepository
 import com.tv2000.app.storage.PlaybackHistoryStore
 import com.tv2000.app.smb.SmbMediaUri
 import com.tv2000.app.smb.SmbResource
+import com.tv2000.app.smb.SmbjMediaClient
+import com.tv2000.app.smb.classifySmbFailure
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -38,6 +40,7 @@ class PlaybackCoordinator(
     private val scanner: ChannelScanner,
     private val catalogRepository: MediaCatalogRepository,
     private val historyStore: PlaybackHistoryStore,
+    private val smbClient: SmbjMediaClient,
     private val scope: CoroutineScope,
     private val monotonicClock: () -> Long = SystemClock::elapsedRealtime,
 ) : Player.Listener {
@@ -48,14 +51,19 @@ class PlaybackCoordinator(
     private var tuneJob: Job? = null
     private var backgroundScanJob: Job? = null
     private var settingsJob: Job? = null
+    private var backExitPromptJob: Job? = null
     private var pendingLeftPressJob: Job? = null
     private var pendingRightPressJob: Job? = null
     private var leftPressPending = false
     private var rightPressPending = false
     private var pendingChannelIndex = 0
     private var playingChannelIndex: Int? = null
-    private var configuredSmbName: String? = null
+    private var configuredUsbRootUri: String? = null
+    private var configuredSmbResources: List<SmbResource> = emptyList()
     private var activeResourceKind: ResourceKind? = null
+    private var activeResourceId: String? = null
+    private var pendingConfirmationAction: PendingConfirmationAction? = null
+    private var pendingConfirmationRequest: ConfirmationRequest? = null
     private val historyWriteMutex = Mutex()
     private val doublePressDetector = DirectionalDoublePressDetector(
         timeoutMs = DIRECTIONAL_DOUBLE_PRESS_TIMEOUT_MS,
@@ -72,7 +80,8 @@ class PlaybackCoordinator(
     }
 
     suspend fun restore(): Boolean {
-        configuredSmbName = historyStore.smbResource()?.displayName
+        configuredSmbResources = historyStore.smbResources()
+        configuredUsbRootUri = historyStore.usbRootUri()
         val rootUri = historyStore.rootUri()
         if (rootUri == null) {
             mutableState.value = freshState(AppMode.NEEDS_STORAGE_ACCESS)
@@ -85,9 +94,22 @@ class PlaybackCoordinator(
         } else {
             ResourceKind.USB
         }
+        activeResourceId = if (activeResourceKind == ResourceKind.SMB) {
+            SmbMediaUri.resourceId(parsedRootUri)
+        } else {
+            USB_RESOURCE_ID
+        }
+        historyStore.setActiveSmbResource(
+            activeResourceId.takeIf { activeResourceKind == ResourceKind.SMB },
+        )
+        if (activeResourceKind == ResourceKind.USB && configuredUsbRootUri == null) {
+            configuredUsbRootUri = rootUri
+            historyStore.saveUsbRootUri(rootUri)
+        }
         if (DebugStorageFallback.shouldDiscardStoredRoot(context, parsedRootUri)) {
             historyStore.clearRootUri()
             activeResourceKind = null
+            activeResourceId = null
             mutableState.value = freshState(AppMode.NEEDS_STORAGE_ACCESS)
             return false
         }
@@ -105,27 +127,95 @@ class PlaybackCoordinator(
     }
 
     suspend fun onStorageGranted(rootUri: Uri) {
-        backgroundScanJob?.cancel()
-        checkpoint()
-        player.stop()
-        activeResourceKind = ResourceKind.USB
-        historyStore.saveRootUri(rootUri.toString())
-        scanAndPlay(rootUri, restoringApp = false)
+        configuredUsbRootUri = rootUri.toString()
+        historyStore.saveUsbRootUri(rootUri.toString())
+        activateResource(ResourceKind.USB, USB_RESOURCE_ID, rootUri)
     }
 
-    suspend fun onSmbResourceSaved(resource: SmbResource) {
-        backgroundScanJob?.cancel()
-        checkpoint()
-        player.stop()
-        historyStore.saveSmbResource(resource)
-        configuredSmbName = resource.displayName
-        activeResourceKind = ResourceKind.SMB
-        val rootUri = SmbMediaUri.root(resource)
-        historyStore.saveRootUri(rootUri.toString())
-        scanAndPlay(rootUri, restoringApp = false)
+    suspend fun addSmbResource(resource: SmbResource): AddSmbResourceResult {
+        validateSmbResource(resource)?.let { failure -> return failure }
+
+        configuredSmbResources = historyStore.saveSmbResource(resource)
+        activateResource(ResourceKind.SMB, resource.id, SmbMediaUri.root(resource))
+        return AddSmbResourceResult.Success
     }
 
-    fun configuredSmbResource(): SmbResource? = historyStore.cachedSmbResource()
+    suspend fun updateSmbResource(
+        originalResourceId: String,
+        resource: SmbResource,
+    ): AddSmbResourceResult {
+        validateSmbResource(resource)?.let { failure -> return failure }
+
+        val affectsActiveResource = activeResourceKind == ResourceKind.SMB &&
+            (activeResourceId == originalResourceId || activeResourceId == resource.id)
+        configuredSmbResources = historyStore.saveSmbResource(resource)
+        if (resource.id != originalResourceId) {
+            configuredSmbResources = historyStore.deleteSmbResource(originalResourceId)
+        }
+
+        if (affectsActiveResource) {
+            activateResource(ResourceKind.SMB, resource.id, SmbMediaUri.root(resource))
+        } else {
+            mutableState.value = mutableState.value.copy(
+                resourceSettingsVisible = true,
+                smbResourceActionsVisible = false,
+                managedSmbResourceId = resource.id,
+            )
+            refreshResourceConfiguration()
+        }
+        return AddSmbResourceResult.Success
+    }
+
+    fun selectedManagedSmbResource(): SmbResource? {
+        val resourceId = mutableState.value.managedSmbResourceId ?: return null
+        return configuredSmbResources.firstOrNull { resource -> resource.id == resourceId }
+    }
+
+    fun confirmationRequest(): ConfirmationRequest? = pendingConfirmationRequest
+
+    fun cancelPendingConfirmation() {
+        pendingConfirmationAction = null
+        pendingConfirmationRequest = null
+    }
+
+    fun confirmPendingAction() {
+        val action = pendingConfirmationAction ?: return
+        cancelPendingConfirmation()
+        when (action) {
+            is PendingConfirmationAction.DELETE_SMB -> {
+                if (activeResourceKind == ResourceKind.SMB &&
+                    activeResourceId == action.resourceId
+                ) {
+                    return
+                }
+                mutableState.value = mutableState.value.copy(
+                    resourceSettingsVisible = true,
+                    resourceSettingsSelection = 0,
+                    smbResourceActionsVisible = false,
+                    managedSmbResourceId = null,
+                )
+                settingsJob?.cancel()
+                settingsJob = scope.launch { deleteSmbResource(action.resourceId) }
+            }
+
+            is PendingConfirmationAction.ADVANCED -> {
+                mutableState.value = mutableState.value.copy(advancedSettingsVisible = false)
+                performAdvancedSettingsAction(action.action)
+            }
+        }
+    }
+
+    private suspend fun validateSmbResource(
+        resource: SmbResource,
+    ): AddSmbResourceResult.Failure? {
+        val validationError = withContext(Dispatchers.IO) {
+            runCatching { smbClient.validate(resource) }.exceptionOrNull()
+        } ?: return null
+        val failure = classifySmbFailure(validationError)
+        return AddSmbResourceResult.Failure(
+            context.getString(R.string.smb_validation_failed, failure.diagnostic),
+        )
+    }
 
     fun handleKey(keyCode: Int): RemoteResult {
         val current = mutableState.value
@@ -139,26 +229,38 @@ class PlaybackCoordinator(
             current.mode != AppMode.SCANNING &&
             keyCode == KeyEvent.KEYCODE_MENU
         ) {
+            cancelBackExitPrompt()
             mutableState.value = current.copy(
-                settingsMenuVisible = !current.settingsMenuVisible,
-                settingsMenuSelection = if (current.settingsMenuVisible) {
-                    current.settingsMenuSelection
+                mainMenuVisible = !current.mainMenuVisible,
+                mainMenuSelection = if (current.mainMenuVisible) {
+                    current.mainMenuSelection
                 } else {
-                    0
+                    initialMainMenuSelection()
                 },
                 channelListVisible = false,
-                resourceMenuVisible = false,
+                exitPromptVisible = false,
+                resourceSettingsVisible = false,
+                smbResourceActionsVisible = false,
+                advancedSettingsVisible = false,
                 channelOverlayVisible = false,
             )
             return RemoteResult.CONSUMED
         }
 
-        if (current.settingsMenuVisible) {
-            return handleSettingsMenuKey(keyCode)
+        if (current.mainMenuVisible) {
+            return handleMainMenuKey(keyCode)
         }
 
-        if (current.resourceMenuVisible) {
-            return handleResourceMenuKey(keyCode)
+        if (current.resourceSettingsVisible) {
+            return handleResourceSettingsKey(keyCode)
+        }
+
+        if (current.smbResourceActionsVisible) {
+            return handleSmbResourceActionsKey(keyCode)
+        }
+
+        if (current.advancedSettingsVisible) {
+            return handleAdvancedSettingsKey(keyCode)
         }
 
         if (current.mode == AppMode.NEEDS_STORAGE_ACCESS ||
@@ -228,11 +330,14 @@ class PlaybackCoordinator(
             }
 
             KeyEvent.KEYCODE_BACK -> {
+                cancelBackExitPrompt()
                 mutableState.value = current.copy(
                     channelListVisible = true,
                     channelListSelection = current.currentChannelIndex,
+                    exitPromptVisible = true,
                     channelOverlayVisible = false,
                 )
+                scheduleBackExitPromptDismiss()
                 RemoteResult.CONSUMED
             }
 
@@ -252,6 +357,7 @@ class PlaybackCoordinator(
         tuneJob?.cancel()
         backgroundScanJob?.cancel()
         settingsJob?.cancel()
+        backExitPromptJob?.cancel()
         player.removeListener(this)
         player.release()
     }
@@ -347,6 +453,8 @@ class PlaybackCoordinator(
                 if (result.reason == ScanFailure.PERMISSION_LOST) {
                     historyStore.clearRootUri()
                     activeResourceKind = null
+                    activeResourceId = null
+                    historyStore.setActiveSmbResource(null)
                     mutableState.value = freshState(AppMode.NEEDS_STORAGE_ACCESS)
                     false
                 } else {
@@ -417,7 +525,7 @@ class PlaybackCoordinator(
                     ?: false
 
                 SmbMediaUri.SCHEME -> {
-                    historyStore.smbResource() != null &&
+                    historyStore.smbResource(uri) != null &&
                         SmbMediaUri.relativePath(uri) != null
                 }
 
@@ -552,23 +660,27 @@ class PlaybackCoordinator(
         val current = mutableState.value
         return when (keyCode) {
             KeyEvent.KEYCODE_DPAD_UP -> {
+                cancelBackExitPrompt()
                 mutableState.value = current.copy(
                     channelListSelection = wrappedIndex(
                         current.channelListSelection,
                         -1,
                         current.channels.size,
                     ),
+                    exitPromptVisible = false,
                 )
                 RemoteResult.CONSUMED
             }
 
             KeyEvent.KEYCODE_DPAD_DOWN -> {
+                cancelBackExitPrompt()
                 mutableState.value = current.copy(
                     channelListSelection = wrappedIndex(
                         current.channelListSelection,
                         1,
                         current.channels.size,
                     ),
+                    exitPromptVisible = false,
                 )
                 RemoteResult.CONSUMED
             }
@@ -576,25 +688,42 @@ class PlaybackCoordinator(
             KeyEvent.KEYCODE_DPAD_CENTER,
             KeyEvent.KEYCODE_ENTER,
             -> {
-                mutableState.value = current.copy(channelListVisible = false)
+                cancelBackExitPrompt()
+                mutableState.value = current.copy(
+                    channelListVisible = false,
+                    exitPromptVisible = false,
+                )
                 requestTune(current.channelListSelection)
                 RemoteResult.CONSUMED
             }
 
-            KeyEvent.KEYCODE_BACK -> RemoteResult.EXIT
+            KeyEvent.KEYCODE_BACK -> {
+                cancelBackExitPrompt()
+                if (current.exitPromptVisible) {
+                    RemoteResult.EXIT
+                } else {
+                    mutableState.value = current.copy(
+                        channelListVisible = false,
+                        exitPromptVisible = false,
+                    )
+                    RemoteResult.CONSUMED
+                }
+            }
+
             else -> RemoteResult.NOT_HANDLED
         }
     }
 
-    private fun handleSettingsMenuKey(keyCode: Int): RemoteResult {
+    private fun handleMainMenuKey(keyCode: Int): RemoteResult {
         val current = mutableState.value
+        val actions = mainMenuActions()
         return when (keyCode) {
             KeyEvent.KEYCODE_DPAD_UP -> {
                 mutableState.value = current.copy(
-                    settingsMenuSelection = wrappedIndex(
-                        current.settingsMenuSelection,
+                    mainMenuSelection = wrappedIndex(
+                        current.mainMenuSelection,
                         -1,
-                        SettingsAction.entries.size,
+                        actions.size,
                     ),
                 )
                 RemoteResult.CONSUMED
@@ -602,10 +731,218 @@ class PlaybackCoordinator(
 
             KeyEvent.KEYCODE_DPAD_DOWN -> {
                 mutableState.value = current.copy(
-                    settingsMenuSelection = wrappedIndex(
-                        current.settingsMenuSelection,
+                    mainMenuSelection = wrappedIndex(
+                        current.mainMenuSelection,
                         1,
-                        SettingsAction.entries.size,
+                        actions.size,
+                    ),
+                )
+                RemoteResult.CONSUMED
+            }
+
+            KeyEvent.KEYCODE_DPAD_CENTER,
+            KeyEvent.KEYCODE_ENTER,
+            -> when (val action = actions[current.mainMenuSelection.coerceIn(actions.indices)]) {
+                MainMenuAction.USB -> {
+                    mutableState.value = current.copy(mainMenuVisible = false)
+                    settingsJob?.cancel()
+                    settingsJob = scope.launch { selectConfiguredUsbResource() }
+                    RemoteResult.CONSUMED
+                }
+
+                is MainMenuAction.SMB -> {
+                    mutableState.value = current.copy(mainMenuVisible = false)
+                    settingsJob?.cancel()
+                    settingsJob = scope.launch { selectConfiguredSmbResource(action.resourceId) }
+                    RemoteResult.CONSUMED
+                }
+
+                MainMenuAction.RESOURCE_MANAGEMENT -> {
+                    mutableState.value = current.copy(
+                        mainMenuVisible = false,
+                        resourceSettingsVisible = true,
+                        resourceSettingsSelection = 0,
+                    )
+                    RemoteResult.CONSUMED
+                }
+
+                MainMenuAction.ADVANCED_SETTINGS -> {
+                    mutableState.value = current.copy(
+                        mainMenuVisible = false,
+                        advancedSettingsVisible = true,
+                        advancedSettingsSelection = 0,
+                    )
+                    RemoteResult.CONSUMED
+                }
+            }
+
+            KeyEvent.KEYCODE_BACK -> {
+                mutableState.value = current.copy(mainMenuVisible = false)
+                RemoteResult.CONSUMED
+            }
+
+            else -> RemoteResult.NOT_HANDLED
+        }
+    }
+
+    private fun handleResourceSettingsKey(keyCode: Int): RemoteResult {
+        val current = mutableState.value
+        val actions = resourceSettingsActions()
+        return when (keyCode) {
+            KeyEvent.KEYCODE_DPAD_UP -> {
+                mutableState.value = current.copy(
+                    resourceSettingsSelection = wrappedIndex(
+                        current.resourceSettingsSelection,
+                        -1,
+                        actions.size,
+                    ),
+                )
+                RemoteResult.CONSUMED
+            }
+
+            KeyEvent.KEYCODE_DPAD_DOWN -> {
+                mutableState.value = current.copy(
+                    resourceSettingsSelection = wrappedIndex(
+                        current.resourceSettingsSelection,
+                        1,
+                        actions.size,
+                    ),
+                )
+                RemoteResult.CONSUMED
+            }
+
+            KeyEvent.KEYCODE_DPAD_CENTER,
+            KeyEvent.KEYCODE_ENTER,
+            -> when (val action = actions[current.resourceSettingsSelection.coerceIn(actions.indices)]) {
+                ResourceManagementAction.ADD_REMOTE_RESOURCE -> {
+                    RemoteResult.REQUEST_SMB_SETUP
+                }
+
+                is ResourceManagementAction.MANAGE_SMB -> {
+                    mutableState.value = current.copy(
+                        resourceSettingsVisible = false,
+                        smbResourceActionsVisible = true,
+                        smbResourceActionsSelection = 0,
+                        managedSmbResourceId = action.resourceId,
+                    )
+                    RemoteResult.CONSUMED
+                }
+            }
+
+            KeyEvent.KEYCODE_BACK -> {
+                mutableState.value = current.copy(
+                    resourceSettingsVisible = false,
+                    mainMenuVisible = true,
+                    mainMenuSelection = mainMenuActions()
+                        .indexOf(MainMenuAction.RESOURCE_MANAGEMENT)
+                        .coerceAtLeast(0),
+                )
+                RemoteResult.CONSUMED
+            }
+
+            else -> RemoteResult.NOT_HANDLED
+        }
+    }
+
+    private fun handleSmbResourceActionsKey(keyCode: Int): RemoteResult {
+        val current = mutableState.value
+        val resource = selectedManagedSmbResource()
+            ?: run {
+                mutableState.value = current.copy(
+                    smbResourceActionsVisible = false,
+                    resourceSettingsVisible = true,
+                )
+                return RemoteResult.CONSUMED
+            }
+        return when (keyCode) {
+            KeyEvent.KEYCODE_DPAD_UP -> {
+                mutableState.value = current.copy(
+                    smbResourceActionsSelection = wrappedIndex(
+                        current.smbResourceActionsSelection,
+                        -1,
+                        SmbResourceAction.entries.size,
+                    ),
+                )
+                RemoteResult.CONSUMED
+            }
+
+            KeyEvent.KEYCODE_DPAD_DOWN -> {
+                mutableState.value = current.copy(
+                    smbResourceActionsSelection = wrappedIndex(
+                        current.smbResourceActionsSelection,
+                        1,
+                        SmbResourceAction.entries.size,
+                    ),
+                )
+                RemoteResult.CONSUMED
+            }
+
+            KeyEvent.KEYCODE_DPAD_CENTER,
+            KeyEvent.KEYCODE_ENTER,
+            -> when (
+                SmbResourceAction.entries[
+                    current.smbResourceActionsSelection.coerceIn(
+                        SmbResourceAction.entries.indices,
+                    )
+                ]
+            ) {
+                SmbResourceAction.VIEW -> RemoteResult.REQUEST_SMB_VIEW
+                SmbResourceAction.EDIT -> RemoteResult.REQUEST_SMB_EDIT
+                SmbResourceAction.DELETE -> {
+                    if (activeResourceKind == ResourceKind.SMB &&
+                        activeResourceId == resource.id
+                    ) {
+                        RemoteResult.CONSUMED
+                    } else {
+                        requestConfirmation(
+                            action = PendingConfirmationAction.DELETE_SMB(resource.id),
+                            title = context.getString(R.string.confirm_delete_resource_title),
+                            message = context.getString(
+                                R.string.confirm_delete_resource_message,
+                                resource.displayName,
+                            ),
+                        )
+                        RemoteResult.REQUEST_CONFIRMATION
+                    }
+                }
+            }
+
+            KeyEvent.KEYCODE_BACK -> {
+                val resourceIndex = configuredSmbResources.indexOfFirst { configured ->
+                    configured.id == resource.id
+                }
+                mutableState.value = current.copy(
+                    smbResourceActionsVisible = false,
+                    resourceSettingsVisible = true,
+                    resourceSettingsSelection = (resourceIndex + 1).coerceAtLeast(0),
+                )
+                RemoteResult.CONSUMED
+            }
+
+            else -> RemoteResult.NOT_HANDLED
+        }
+    }
+
+    private fun handleAdvancedSettingsKey(keyCode: Int): RemoteResult {
+        val current = mutableState.value
+        return when (keyCode) {
+            KeyEvent.KEYCODE_DPAD_UP -> {
+                mutableState.value = current.copy(
+                    advancedSettingsSelection = wrappedIndex(
+                        current.advancedSettingsSelection,
+                        -1,
+                        AdvancedSettingsAction.entries.size,
+                    ),
+                )
+                RemoteResult.CONSUMED
+            }
+
+            KeyEvent.KEYCODE_DPAD_DOWN -> {
+                mutableState.value = current.copy(
+                    advancedSettingsSelection = wrappedIndex(
+                        current.advancedSettingsSelection,
+                        1,
+                        AdvancedSettingsAction.entries.size,
                     ),
                 )
                 RemoteResult.CONSUMED
@@ -614,87 +951,22 @@ class PlaybackCoordinator(
             KeyEvent.KEYCODE_DPAD_CENTER,
             KeyEvent.KEYCODE_ENTER,
             -> {
-                val action = SettingsAction.entries[current.settingsMenuSelection]
-                if (action == SettingsAction.SELECT_RESOURCE) {
-                    mutableState.value = current.copy(
-                        settingsMenuVisible = false,
-                        resourceMenuVisible = true,
-                        resourceMenuSelection = resourceActions().indexOfFirst { resourceAction ->
-                            when (activeResourceKind) {
-                                ResourceKind.USB -> resourceAction == ResourceAction.USB
-                                ResourceKind.SMB -> resourceAction == ResourceAction.SMB
-                                null -> resourceAction == ResourceAction.USB
-                            }
-                        }.coerceAtLeast(0),
+                val action = AdvancedSettingsAction.entries[
+                    current.advancedSettingsSelection.coerceIn(
+                        AdvancedSettingsAction.entries.indices,
                     )
-                    return RemoteResult.CONSUMED
-                }
-
-                mutableState.value = current.copy(settingsMenuVisible = false)
-                performSettingsAction(action)
-                RemoteResult.CONSUMED
-            }
-
-            KeyEvent.KEYCODE_BACK -> {
-                mutableState.value = current.copy(settingsMenuVisible = false)
-                RemoteResult.CONSUMED
-            }
-
-            else -> RemoteResult.NOT_HANDLED
-        }
-    }
-
-    private fun handleResourceMenuKey(keyCode: Int): RemoteResult {
-        val current = mutableState.value
-        val actions = resourceActions()
-        return when (keyCode) {
-            KeyEvent.KEYCODE_DPAD_UP -> {
-                mutableState.value = current.copy(
-                    resourceMenuSelection = wrappedIndex(
-                        current.resourceMenuSelection,
-                        -1,
-                        actions.size,
-                    ),
-                )
-                RemoteResult.CONSUMED
-            }
-
-            KeyEvent.KEYCODE_DPAD_DOWN -> {
-                mutableState.value = current.copy(
-                    resourceMenuSelection = wrappedIndex(
-                        current.resourceMenuSelection,
-                        1,
-                        actions.size,
-                    ),
-                )
-                RemoteResult.CONSUMED
-            }
-
-            KeyEvent.KEYCODE_DPAD_CENTER,
-            KeyEvent.KEYCODE_ENTER,
-            -> when (actions[current.resourceMenuSelection.coerceIn(actions.indices)]) {
-                ResourceAction.USB -> {
-                    mutableState.value = current.copy(resourceMenuVisible = false)
-                    RemoteResult.REQUEST_STORAGE
-                }
-
-                ResourceAction.SMB -> {
-                    mutableState.value = current.copy(resourceMenuVisible = false)
-                    settingsJob?.cancel()
-                    settingsJob = scope.launch { selectConfiguredSmbResource() }
-                    RemoteResult.CONSUMED
-                }
-
-                ResourceAction.ADD_OR_EDIT_SMB -> {
-                    mutableState.value = current.copy(resourceMenuVisible = false)
-                    RemoteResult.REQUEST_SMB_SETUP
-                }
+                ]
+                requestAdvancedSettingsConfirmation(action)
+                RemoteResult.REQUEST_CONFIRMATION
             }
 
             KeyEvent.KEYCODE_BACK -> {
                 mutableState.value = current.copy(
-                    resourceMenuVisible = false,
-                    settingsMenuVisible = true,
+                    advancedSettingsVisible = false,
+                    mainMenuVisible = true,
+                    mainMenuSelection = mainMenuActions()
+                        .indexOf(MainMenuAction.ADVANCED_SETTINGS)
+                        .coerceAtLeast(0),
                 )
                 RemoteResult.CONSUMED
             }
@@ -703,32 +975,120 @@ class PlaybackCoordinator(
         }
     }
 
-    private fun resourceActions(): List<ResourceAction> = buildList {
-        add(ResourceAction.USB)
-        if (configuredSmbName != null) add(ResourceAction.SMB)
-        add(ResourceAction.ADD_OR_EDIT_SMB)
+    private fun mainMenuActions(): List<MainMenuAction> = buildList {
+        if (configuredUsbRootUri != null) add(MainMenuAction.USB)
+        configuredSmbResources.forEach { resource -> add(MainMenuAction.SMB(resource.id)) }
+        add(MainMenuAction.RESOURCE_MANAGEMENT)
+        add(MainMenuAction.ADVANCED_SETTINGS)
     }
 
-    private suspend fun selectConfiguredSmbResource() {
-        val resource = historyStore.smbResource() ?: return
+    private fun initialMainMenuSelection(): Int {
+        val actions = mainMenuActions()
+        val activeIndex = when (activeResourceKind) {
+            ResourceKind.USB -> actions.indexOf(MainMenuAction.USB)
+            ResourceKind.SMB -> actions.indexOfFirst { action ->
+                action is MainMenuAction.SMB && action.resourceId == activeResourceId
+            }
+
+            null -> -1
+        }
+        return activeIndex.takeIf { it >= 0 }
+            ?: actions.indexOf(MainMenuAction.RESOURCE_MANAGEMENT).coerceAtLeast(0)
+    }
+
+    private fun resourceSettingsActions(): List<ResourceManagementAction> = buildList {
+        add(ResourceManagementAction.ADD_REMOTE_RESOURCE)
+        configuredSmbResources.forEach { resource ->
+            add(ResourceManagementAction.MANAGE_SMB(resource.id))
+        }
+    }
+
+    private suspend fun selectConfiguredUsbResource() {
+        val rootUri = configuredUsbRootUri
+            ?.let(Uri::parse)
+            ?: return
+        activateResource(ResourceKind.USB, USB_RESOURCE_ID, rootUri)
+    }
+
+    private suspend fun selectConfiguredSmbResource(resourceId: String) {
+        val resource = configuredSmbResources.firstOrNull { it.id == resourceId } ?: return
+        activateResource(ResourceKind.SMB, resource.id, SmbMediaUri.root(resource))
+    }
+
+    private suspend fun activateResource(
+        kind: ResourceKind,
+        resourceId: String,
+        rootUri: Uri,
+    ) {
+        backgroundScanJob?.cancel()
         checkpoint()
         player.stop()
-        activeResourceKind = ResourceKind.SMB
-        val rootUri = SmbMediaUri.root(resource)
+        activeResourceKind = kind
+        activeResourceId = resourceId
+        historyStore.setActiveSmbResource(resourceId.takeIf { kind == ResourceKind.SMB })
         historyStore.saveRootUri(rootUri.toString())
         scanAndPlay(rootUri, restoringApp = false)
     }
 
-    private fun performSettingsAction(action: SettingsAction) {
+    private suspend fun deleteSmbResource(resourceId: String) {
+        if (activeResourceKind == ResourceKind.SMB && activeResourceId == resourceId) return
+        configuredSmbResources.firstOrNull { resource -> resource.id == resourceId }
+            ?.let(SmbMediaUri::root)
+            ?.let { rootUri -> catalogRepository.invalidateIndex(rootUri) }
+        configuredSmbResources = historyStore.deleteSmbResource(resourceId)
+        refreshResourceConfiguration()
+    }
+
+    private fun refreshResourceConfiguration() {
+        mutableState.value = mutableState.value.copy(
+            activeResourceKind = activeResourceKind,
+            activeResourceId = activeResourceId,
+            usbResourceConfigured = configuredUsbRootUri != null,
+            smbResources = configuredSmbResources.map { resource ->
+                SmbResourceSummary(resource.id, resource.displayName)
+            },
+        )
+    }
+
+    private fun performAdvancedSettingsAction(action: AdvancedSettingsAction) {
         settingsJob?.cancel()
         settingsJob = scope.launch {
             when (action) {
-                SettingsAction.SELECT_RESOURCE -> Unit
-                SettingsAction.CLEAR_INDEX -> clearAndRebuildIndex()
-                SettingsAction.RESET_CURRENT_CHANNEL -> resetCurrentChannelProgress()
-                SettingsAction.RESET_ALL_CHANNELS -> resetAllChannelProgress()
+                AdvancedSettingsAction.CLEAR_INDEX -> clearAndRebuildIndex()
+                AdvancedSettingsAction.RESET_CURRENT_CHANNEL -> resetCurrentChannelProgress()
+                AdvancedSettingsAction.RESET_ALL_CHANNELS -> resetAllChannelProgress()
             }
         }
+    }
+
+    private fun requestAdvancedSettingsConfirmation(action: AdvancedSettingsAction) {
+        val (titleRes, messageRes) = when (action) {
+            AdvancedSettingsAction.CLEAR_INDEX -> {
+                R.string.confirm_clear_index_title to R.string.confirm_clear_index_message
+            }
+
+            AdvancedSettingsAction.RESET_CURRENT_CHANNEL -> {
+                R.string.confirm_reset_current_title to R.string.confirm_reset_current_message
+            }
+
+            AdvancedSettingsAction.RESET_ALL_CHANNELS -> {
+                R.string.confirm_reset_all_title to R.string.confirm_reset_all_message
+            }
+        }
+        requestConfirmation(
+            action = PendingConfirmationAction.ADVANCED(action),
+            title = context.getString(titleRes),
+            message = context.getString(messageRes),
+        )
+    }
+
+    private fun requestConfirmation(
+        action: PendingConfirmationAction,
+        title: String,
+        message: String,
+    ) {
+        pendingConfirmationAction = action
+        pendingConfirmationRequest = ConfirmationRequest(title, message)
     }
 
     private suspend fun clearAndRebuildIndex() {
@@ -789,7 +1149,11 @@ class PlaybackCoordinator(
         currentChannelIndex = currentChannelIndex,
         channelListSelection = channelListSelection,
         activeResourceKind = activeResourceKind,
-        smbResourceName = configuredSmbName,
+        activeResourceId = activeResourceId,
+        usbResourceConfigured = configuredUsbRootUri != null,
+        smbResources = configuredSmbResources.map { resource ->
+            SmbResourceSummary(resource.id, resource.displayName)
+        },
         scanFailure = scanFailure,
         scanDiagnostic = scanDiagnostic,
     )
@@ -1060,6 +1424,19 @@ class PlaybackCoordinator(
         }
     }
 
+    private fun scheduleBackExitPromptDismiss() {
+        backExitPromptJob?.cancel()
+        backExitPromptJob = scope.launch {
+            delay(BACK_EXIT_PROMPT_DURATION_MS)
+            mutableState.value = mutableState.value.copy(exitPromptVisible = false)
+        }
+    }
+
+    private fun cancelBackExitPrompt() {
+        backExitPromptJob?.cancel()
+        backExitPromptJob = null
+    }
+
     private fun persistCurrentSnapshot() {
         val snapshot = capturePlaybackSnapshot() ?: return
         scope.launch {
@@ -1103,7 +1480,32 @@ class PlaybackCoordinator(
         const val MINIMUM_RESUME_POSITION_MS = 5_000L
         const val DIRECTIONAL_DOUBLE_PRESS_TIMEOUT_MS = 350L
         const val PREVIOUS_EPISODE_POSITION_THRESHOLD_MS = 5_000L
+        const val BACK_EXIT_PROMPT_DURATION_MS = 3_000L
+        const val USB_RESOURCE_ID = "usb"
     }
+}
+
+private sealed interface MainMenuAction {
+    data object USB : MainMenuAction
+    data class SMB(val resourceId: String) : MainMenuAction
+    data object RESOURCE_MANAGEMENT : MainMenuAction
+    data object ADVANCED_SETTINGS : MainMenuAction
+}
+
+private sealed interface ResourceManagementAction {
+    data object ADD_REMOTE_RESOURCE : ResourceManagementAction
+    data class MANAGE_SMB(val resourceId: String) : ResourceManagementAction
+}
+
+private enum class SmbResourceAction {
+    VIEW,
+    EDIT,
+    DELETE,
+}
+
+private sealed interface PendingConfirmationAction {
+    data class DELETE_SMB(val resourceId: String) : PendingConfirmationAction
+    data class ADVANCED(val action: AdvancedSettingsAction) : PendingConfirmationAction
 }
 
 internal fun wrappedIndex(current: Int, delta: Int, size: Int): Int {

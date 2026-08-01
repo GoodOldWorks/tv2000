@@ -8,6 +8,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.tv2000.app.model.ScannedChannel
 import com.tv2000.app.model.ScannedEpisode
 import com.tv2000.app.storage.db.Tv2000Database
+import com.tv2000.app.smb.SmbResource
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -192,6 +193,45 @@ class RoomPersistenceTest {
                 historyStore.channelPlayback(channel.id) == null
             },
         )
+    }
+
+    @Test
+    fun storesMultipleSmbResourcesAndUpdatesMatchingLocation() = runBlocking {
+        val suffix = System.nanoTime().toString()
+        val first = SmbResource(
+            host = "first-$suffix.invalid",
+            share = "Media",
+            username = "viewer",
+            password = "old-password",
+        )
+        val second = SmbResource(
+            host = "second-$suffix.invalid",
+            share = "Media",
+        )
+        val historyStore = PlaybackHistoryStore(context, database)
+
+        try {
+            historyStore.saveSmbResource(first)
+            historyStore.saveSmbResource(second)
+
+            val reloaded = PlaybackHistoryStore(context, database).smbResources()
+            assertTrue(reloaded.any { resource -> resource.id == first.id })
+            assertTrue(reloaded.any { resource -> resource.id == second.id })
+
+            val updated = first.copy(password = "new-password")
+            val afterUpdate = historyStore.saveSmbResource(updated)
+            assertEquals(
+                1,
+                afterUpdate.count { resource -> resource.id == first.id },
+            )
+            assertEquals(
+                "new-password",
+                afterUpdate.first { resource -> resource.id == first.id }.password,
+            )
+        } finally {
+            historyStore.deleteSmbResource(first.id)
+            historyStore.deleteSmbResource(second.id)
+        }
     }
 
     private fun scannedChannel(

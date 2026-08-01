@@ -20,13 +20,13 @@ import java.io.File
 
 class ChannelScanner(
     private val smbClient: SmbjMediaClient? = null,
-    private val smbResourceProvider: suspend () -> SmbResource? = { null },
+    private val smbResourceProvider: suspend (Uri) -> SmbResource? = { null },
 ) {
     suspend fun scan(context: Context, rootUri: Uri): ScanResult = withContext(Dispatchers.IO) {
         if (SmbMediaUri.isSmb(rootUri)) {
             val client = smbClient
                 ?: return@withContext ScanResult.Failure(ScanFailure.UNAVAILABLE)
-            val resource = smbResourceProvider()
+            val resource = smbResourceProvider(rootUri)
                 ?: return@withContext ScanResult.Failure(ScanFailure.PERMISSION_LOST)
             return@withContext try {
                 ScanResult.Success(client.scanChannels(resource))

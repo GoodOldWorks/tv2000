@@ -12,8 +12,10 @@ import com.tv2000.app.storage.db.ChannelPlaybackStateEntity
 import com.tv2000.app.storage.db.EpisodePlaybackEntity
 import com.tv2000.app.storage.db.Tv2000Database
 import com.tv2000.app.smb.DEFAULT_SMB_PORT
+import com.tv2000.app.smb.SmbMediaUri
 import com.tv2000.app.smb.SmbResource
 import kotlinx.coroutines.flow.first
+import org.json.JSONArray
 import org.json.JSONObject
 import java.security.MessageDigest
 
@@ -25,10 +27,13 @@ class PlaybackHistoryStore(
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
     @Volatile
-    private var cachedSmbResource: SmbResource? = null
+    private var cachedSmbResources: List<SmbResource> = emptyList()
 
     @Volatile
-    private var smbResourceLoaded = false
+    private var smbResourcesLoaded = false
+
+    @Volatile
+    private var activeSmbResourceId: String? = null
 
     suspend fun rootUri(): String? =
         context.tv2000DataStore.data.first()[ROOT_URI]
@@ -45,23 +50,79 @@ class PlaybackHistoryStore(
         }
     }
 
-    suspend fun smbResource(): SmbResource? {
-        if (smbResourceLoaded) return cachedSmbResource
-        val resource = context.tv2000DataStore.data.first()[SMB_RESOURCE]
-            ?.let(::decodeSmbResource)
-        cachedSmbResource = resource
-        smbResourceLoaded = true
-        return resource
+    suspend fun usbRootUri(): String? =
+        context.tv2000DataStore.data.first()[USB_ROOT_URI]
+
+    suspend fun saveUsbRootUri(uri: String) {
+        context.tv2000DataStore.edit { preferences ->
+            preferences[USB_ROOT_URI] = uri
+        }
     }
 
-    fun cachedSmbResource(): SmbResource? = cachedSmbResource
-
-    suspend fun saveSmbResource(resource: SmbResource) {
+    suspend fun clearUsbRootUri() {
         context.tv2000DataStore.edit { preferences ->
-            preferences[SMB_RESOURCE] = encodeSmbResource(resource)
+            preferences.remove(USB_ROOT_URI)
         }
-        cachedSmbResource = resource
-        smbResourceLoaded = true
+    }
+
+    suspend fun smbResources(): List<SmbResource> {
+        if (smbResourcesLoaded) return cachedSmbResources
+        val preferences = context.tv2000DataStore.data.first()
+        val resources = preferences[SMB_RESOURCES]
+            ?.let(::decodeSmbResources)
+            ?: preferences[SMB_RESOURCE]
+                ?.let(::decodeSmbResource)
+                ?.let { resource -> listOf(resource) }
+            ?: emptyList()
+        cachedSmbResources = resources
+        smbResourcesLoaded = true
+        return resources
+    }
+
+    suspend fun smbResource(uri: android.net.Uri): SmbResource? {
+        val resources = smbResources()
+        val resourceId = SmbMediaUri.resourceId(uri) ?: activeSmbResourceId
+        return resources.firstOrNull { resource -> resource.id == resourceId }
+            ?: resources.singleOrNull()
+    }
+
+    fun cachedSmbResource(uri: android.net.Uri): SmbResource? {
+        val resourceId = SmbMediaUri.resourceId(uri) ?: activeSmbResourceId
+        return cachedSmbResources.firstOrNull { resource -> resource.id == resourceId }
+            ?: cachedSmbResources.singleOrNull()
+    }
+
+    fun setActiveSmbResource(resourceId: String?) {
+        activeSmbResourceId = resourceId
+    }
+
+    suspend fun saveSmbResource(resource: SmbResource): List<SmbResource> {
+        val resources = smbResources().toMutableList()
+        val existingIndex = resources.indexOfFirst { existing -> existing.id == resource.id }
+        if (existingIndex >= 0) {
+            resources[existingIndex] = resource
+        } else {
+            resources += resource
+        }
+        context.tv2000DataStore.edit { preferences ->
+            preferences[SMB_RESOURCES] = encodeSmbResources(resources)
+            preferences.remove(SMB_RESOURCE)
+        }
+        cachedSmbResources = resources
+        smbResourcesLoaded = true
+        return resources
+    }
+
+    suspend fun deleteSmbResource(resourceId: String): List<SmbResource> {
+        val resources = smbResources().filterNot { resource -> resource.id == resourceId }
+        context.tv2000DataStore.edit { preferences ->
+            preferences[SMB_RESOURCES] = encodeSmbResources(resources)
+            preferences.remove(SMB_RESOURCE)
+        }
+        cachedSmbResources = resources
+        smbResourcesLoaded = true
+        if (activeSmbResourceId == resourceId) activeSmbResourceId = null
+        return resources
     }
 
     suspend fun activeChannelId(): String? =
@@ -220,7 +281,9 @@ class PlaybackHistoryStore(
 
     private companion object {
         val ROOT_URI = stringPreferencesKey("root_uri")
+        val USB_ROOT_URI = stringPreferencesKey("usb_root_uri")
         val SMB_RESOURCE = stringPreferencesKey("smb_resource")
+        val SMB_RESOURCES = stringPreferencesKey("smb_resources")
         val LEGACY_ACTIVE_CHANNEL = stringPreferencesKey("active_channel")
         const val HISTORY_KEY_PREFIX = "history_"
         const val DEFAULT_PLAYBACK_SPEED = 1.0f
@@ -238,6 +301,21 @@ private fun encodeSmbResource(resource: SmbResource): String = JSONObject()
     .put("password", resource.password)
     .put("domain", resource.domain)
     .toString()
+
+private fun encodeSmbResources(resources: List<SmbResource>): String = JSONArray().apply {
+    resources.forEach { resource -> put(JSONObject(encodeSmbResource(resource))) }
+}.toString()
+
+private fun decodeSmbResources(encoded: String): List<SmbResource>? = runCatching {
+    val array = JSONArray(encoded)
+    buildList {
+        repeat(array.length()) { index ->
+            decodeSmbResource(array.getJSONObject(index).toString())?.let { resource ->
+                add(resource)
+            }
+        }
+    }
+}.getOrNull()
 
 private fun decodeSmbResource(encoded: String): SmbResource? = runCatching {
     val json = JSONObject(encoded)

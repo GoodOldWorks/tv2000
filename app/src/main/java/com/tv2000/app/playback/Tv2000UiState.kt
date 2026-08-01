@@ -10,12 +10,20 @@ data class Tv2000UiState(
     val currentEpisodeIndex: Int = 0,
     val channelListSelection: Int = 0,
     val channelListVisible: Boolean = false,
-    val settingsMenuSelection: Int = 0,
-    val settingsMenuVisible: Boolean = false,
-    val resourceMenuSelection: Int = 0,
-    val resourceMenuVisible: Boolean = false,
+    val exitPromptVisible: Boolean = false,
+    val mainMenuSelection: Int = 0,
+    val mainMenuVisible: Boolean = false,
+    val resourceSettingsSelection: Int = 0,
+    val resourceSettingsVisible: Boolean = false,
+    val smbResourceActionsSelection: Int = 0,
+    val smbResourceActionsVisible: Boolean = false,
+    val managedSmbResourceId: String? = null,
+    val advancedSettingsSelection: Int = 0,
+    val advancedSettingsVisible: Boolean = false,
     val activeResourceKind: ResourceKind? = null,
-    val smbResourceName: String? = null,
+    val activeResourceId: String? = null,
+    val usbResourceConfigured: Boolean = false,
+    val smbResources: List<SmbResourceSummary> = emptyList(),
     val channelOverlayVisible: Boolean = false,
     val channelOverlayPositionMs: Long = 0L,
     val message: String? = null,
@@ -42,12 +50,14 @@ enum class RemoteResult {
     CONSUMED,
     REQUEST_STORAGE,
     REQUEST_SMB_SETUP,
+    REQUEST_SMB_VIEW,
+    REQUEST_SMB_EDIT,
+    REQUEST_CONFIRMATION,
     EXIT,
     NOT_HANDLED,
 }
 
-enum class SettingsAction {
-    SELECT_RESOURCE,
+enum class AdvancedSettingsAction {
     CLEAR_INDEX,
     RESET_CURRENT_CHANNEL,
     RESET_ALL_CHANNELS,
@@ -58,8 +68,18 @@ enum class ResourceKind {
     SMB,
 }
 
-enum class ResourceAction {
-    USB,
-    SMB,
-    ADD_OR_EDIT_SMB,
+data class SmbResourceSummary(
+    val id: String,
+    val name: String,
+)
+
+data class ConfirmationRequest(
+    val title: String,
+    val message: String,
+)
+
+sealed interface AddSmbResourceResult {
+    data object Success : AddSmbResourceResult
+
+    data class Failure(val message: String) : AddSmbResourceResult
 }

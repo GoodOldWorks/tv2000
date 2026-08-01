@@ -52,4 +52,28 @@ class SmbResourceTest {
 
         assertTrue(result.isFailure)
     }
+
+    @Test
+    fun resourceIdentityIgnoresUpdatedCredentialsForTheSameLocation() {
+        val first = SmbResource.parse(
+            address = "smb://nas/Media/TV",
+            username = "viewer",
+            password = "old-password",
+        ).getOrThrow()
+        val updated = SmbResource.parse(
+            address = "smb://NAS/Media/TV",
+            username = "another-user",
+            password = "new-password",
+        ).getOrThrow()
+
+        assertEquals(first.id, updated.id)
+    }
+
+    @Test
+    fun differentLocationsHaveDifferentResourceIdentities() {
+        val first = SmbResource.parse("smb://nas/Media/TV").getOrThrow()
+        val second = SmbResource.parse("smb://nas/Media/Movies").getOrThrow()
+
+        assertTrue(first.id != second.id)
+    }
 }

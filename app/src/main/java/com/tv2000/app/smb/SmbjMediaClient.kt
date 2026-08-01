@@ -72,7 +72,7 @@ class SmbjMediaClient {
                                     '.',
                                     missingDelimiterValue = fileName,
                                 ),
-                                uri = SmbMediaUri.episode(channelName, fileName),
+                                uri = SmbMediaUri.episode(resource, channelName, fileName),
                                 sizeBytes = entry.endOfFile,
                                 modifiedAt = entry.lastWriteTime.toEpochMillis(),
                             )
@@ -86,7 +86,7 @@ class SmbjMediaClient {
                     ScannedChannel(
                         relativePath = channelName,
                         name = displayChannelName(channelName),
-                        sourceUri = SmbMediaUri.channel(channelName),
+                        sourceUri = SmbMediaUri.channel(resource, channelName),
                         episodes = episodes,
                     )
                 }
@@ -95,6 +95,12 @@ class SmbjMediaClient {
                 }
                 .toList()
         }
+
+    fun validate(resource: SmbResource) {
+        withShare(resource) { share ->
+            share.list(resource.directory)
+        }
+    }
 
     fun isReadable(resource: SmbResource, relativePath: String): Boolean =
         runCatching {
