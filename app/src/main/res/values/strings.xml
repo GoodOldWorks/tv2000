@@ -5,7 +5,7 @@
     <string name="scanning_usb">正在扫描资源…</string>
     <string name="select_usb">请选择媒体资源</string>
     <string name="no_playable_content">未找到可播放的视频</string>
-    <string name="put_videos_in_directories">请将视频放入所选资源的一级目录中</string>
+    <string name="put_videos_in_directories">请将视频放入 TV2000 或所设置目录的一级目录中</string>
     <string name="device_removed">资源暂时不可用</string>
     <string name="reinsert_usb">请检查 U 盘或网络连接；可按菜单键切换资源</string>
     <string name="smb_resource_unavailable">SMB 资源不可用，请检查网络或账号</string>
@@ -30,7 +30,7 @@
     <string name="resource_management">资源管理</string>
     <string name="advanced_settings">高级设置</string>
     <string name="add_remote_resource">添加远程资源</string>
-    <string name="resource_management_note">选择已有远程资源，可查看、修改或删除</string>
+    <string name="resource_management_note">选择 U 盘或已有远程资源，可查看和修改设置</string>
     <string name="view_resource">查看</string>
     <string name="edit_resource">修改</string>
     <string name="delete_resource">删除</string>
@@ -38,9 +38,16 @@
     <string name="active_resource_cannot_delete_note">正在使用的资源不能删除，请先切换到其他资源</string>
     <string name="resource_actions_note">删除只会移除应用中的资源配置，不会删除视频文件</string>
     <string name="active_resource">正在使用</string>
+    <string name="usb_settings_title">U 盘设置</string>
+    <string name="usb_settings_help">填写 U 盘内的相对目录。默认优先使用 TV2000；目录不存在时回退到 U 盘根目录。留空则始终使用根目录。</string>
+    <string name="usb_video_directory_hint">视频目录，例如 TV2000</string>
+    <string name="invalid_usb_video_directory">请输入有效的相对目录，不能包含 . 或 ..</string>
+    <string name="usb_video_directory_note">视频目录：%1$s；若目录不存在，将使用 U 盘根目录</string>
+    <string name="usb_root_directory">U 盘根目录</string>
     <string name="clear_index">清除索引</string>
     <string name="reset_current_channel_progress">重置当前频道进度</string>
     <string name="reset_all_channel_progress">重置全部频道进度</string>
+    <string name="reset_app_data">重置 App 数据</string>
     <string name="settings_local_data_note">只修改应用本地数据，不会删除视频文件</string>
     <string name="index_rebuilt">索引已清除并重新建立</string>
     <string name="current_channel_progress_reset">当前频道进度已重置</string>
@@ -53,6 +60,8 @@
     <string name="confirm_reset_current_message">当前频道将回到第一集开头，其他频道的观看进度不会改变。</string>
     <string name="confirm_reset_all_title">重置全部频道进度？</string>
     <string name="confirm_reset_all_message">所有资源中全部频道的观看集数和播放位置都会被清除，此操作无法撤销。</string>
+    <string name="confirm_reset_app_data_title">重置全部 App 数据？</string>
+    <string name="confirm_reset_app_data_message">将清除全部频道索引、观看进度、U 盘设置和远程资源，并返回初次安装状态。视频文件不会被删除，此操作无法撤销。</string>
     <string name="smb_setup_title">远程资源</string>
     <string name="smb_setup_help">地址格式：smb://192.168.1.10/共享名/可选目录。账号、密码和域均可留空。</string>
     <string name="smb_address">SMB 地址</string>

@@ -234,6 +234,37 @@ class RoomPersistenceTest {
         }
     }
 
+    @Test
+    fun resetAppDataClearsCatalogPlaybackAndResourceSettings() = runBlocking {
+        val rootUri = Uri.parse("file:///storage/usb-reset")
+        val channel = catalogRepository.replaceSnapshot(
+            rootUri,
+            listOf(scannedChannel("动画", "001.mp4")),
+        ).single()
+        val historyStore = PlaybackHistoryStore(context, database)
+        historyStore.saveRootUri(rootUri.toString())
+        historyStore.saveUsbRootUri(rootUri.toString())
+        historyStore.saveUsbVideoDirectory("儿童节目")
+        historyStore.saveSmbResource(
+            SmbResource(host = "reset-test.invalid", share = "Media"),
+        )
+        historyStore.saveChannelPlayback(
+            channelId = channel.id,
+            episodeId = channel.episodes.single().id,
+            positionMs = 10_000L,
+            wasPlaying = true,
+        )
+
+        historyStore.resetAppData()
+
+        assertEquals(null, historyStore.rootUri())
+        assertEquals(null, historyStore.usbRootUri())
+        assertEquals(UsbStorageResolver.DEFAULT_VIDEO_DIRECTORY, historyStore.usbVideoDirectory())
+        assertTrue(historyStore.smbResources().isEmpty())
+        assertTrue(catalogRepository.loadIndexedChannels(rootUri).isEmpty())
+        assertEquals(null, historyStore.channelPlayback(channel.id))
+    }
+
     private fun scannedChannel(
         name: String,
         episodeName: String,

@@ -11,12 +11,14 @@ import androidx.media3.datasource.DataSourceException
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.TransferListener
+import java.io.EOFException
 import java.io.IOException
 
 @OptIn(UnstableApi::class)
 class Tv2000DataSource private constructor(
     private val defaultDataSource: DataSource,
     private val smbDataSource: DataSource,
+    private val onSourceOpening: (Uri) -> Unit,
 ) : DataSource {
     private var activeDataSource: DataSource? = null
 
@@ -27,6 +29,7 @@ class Tv2000DataSource private constructor(
 
     override fun open(dataSpec: DataSpec): Long {
         check(activeDataSource == null) { "DataSource is already open" }
+        onSourceOpening(dataSpec.uri)
         val selected = if (SmbMediaUri.isSmb(dataSpec.uri)) smbDataSource else defaultDataSource
         activeDataSource = selected
         return try {
@@ -55,6 +58,7 @@ class Tv2000DataSource private constructor(
         context: Context,
         smbClient: SmbjMediaClient,
         resourceProvider: (Uri) -> SmbResource?,
+        private val onSourceOpening: (Uri) -> Unit,
     ) : DataSource.Factory {
         private val defaultFactory = DefaultDataSource.Factory(context)
         private val smbFactory = SmbDataSource.Factory(smbClient, resourceProvider)
@@ -62,6 +66,7 @@ class Tv2000DataSource private constructor(
         override fun createDataSource(): DataSource = Tv2000DataSource(
             defaultDataSource = defaultFactory.createDataSource(),
             smbDataSource = smbFactory.createDataSource(),
+            onSourceOpening = onSourceOpening,
         )
     }
 }
@@ -76,6 +81,7 @@ private class SmbDataSource(
     private var readPosition = 0L
     private var bytesRemaining = 0L
     private var opened = false
+    private val readBuffer = RandomAccessReadBuffer()
 
     override fun open(dataSpec: DataSpec): Long {
         transferInitializing(dataSpec)
@@ -91,6 +97,7 @@ private class SmbDataSource(
 
         openedUri = dataSpec.uri
         openedFile = file
+        readBuffer.reset()
         readPosition = dataSpec.position
         bytesRemaining = if (dataSpec.length == C.LENGTH_UNSET.toLong()) {
             file.length - dataSpec.position
@@ -106,9 +113,21 @@ private class SmbDataSource(
         if (length == 0) return 0
         if (bytesRemaining == 0L) return C.RESULT_END_OF_INPUT
         val requestedLength = minOf(length.toLong(), bytesRemaining).toInt()
-        val bytesRead = openedFile?.read(buffer, readPosition, offset, requestedLength)
-            ?: throw IOException("SMB file is not open")
-        if (bytesRead <= 0) return C.RESULT_END_OF_INPUT
+        val file = openedFile ?: throw IOException("SMB file is not open")
+        val bytesRead = readBuffer.read(
+            position = readPosition,
+            destination = buffer,
+            destinationOffset = offset,
+            requestedLength = requestedLength,
+            availableLength = bytesRemaining,
+            source = RandomAccessSource(file::read),
+        )
+        if (bytesRead < 0) {
+            throw EOFException("SMB file ended before the advertised length")
+        }
+        if (bytesRead == 0) {
+            throw IOException("SMB server returned no data before end of file")
+        }
 
         readPosition += bytesRead
         bytesRemaining -= bytesRead
@@ -122,6 +141,7 @@ private class SmbDataSource(
         openedUri = null
         openedFile?.close()
         openedFile = null
+        readBuffer.reset()
         if (opened) {
             opened = false
             transferEnded()

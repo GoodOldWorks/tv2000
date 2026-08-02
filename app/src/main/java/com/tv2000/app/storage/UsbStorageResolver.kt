@@ -12,6 +12,7 @@ import java.io.File
 
 object UsbStorageResolver {
     const val MEDIA_STORE_SCHEME = "tv2000-mediastore"
+    const val DEFAULT_VIDEO_DIRECTORY = "TV2000"
 
     fun requiredReadPermission(): String =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -59,6 +60,23 @@ object UsbStorageResolver {
 
     fun fallbackFilePath(uri: Uri): String? =
         uri.getQueryParameter(FALLBACK_PATH_QUERY)?.takeIf(String::isNotBlank)
+
+    fun normalizeVideoDirectory(value: String): String? {
+        val normalized = value
+            .trim()
+            .replace('\\', '/')
+            .trim('/')
+        if (normalized.isEmpty()) return ""
+
+        val segments = normalized.split('/').map(String::trim)
+        if (segments.any { segment ->
+                segment.isEmpty() || segment == "." || segment == ".."
+            }
+        ) {
+            return null
+        }
+        return segments.joinToString("/")
+    }
 
     internal fun mediaStoreRootUri(
         volumeName: String,

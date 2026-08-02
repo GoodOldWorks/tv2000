@@ -9,18 +9,24 @@ import android.os.Bundle
 import android.text.InputType
 import android.view.KeyEvent
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
-import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.platform.ComposeView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.PlayerView
 import com.tv2000.app.playback.AddSmbResourceResult
+import com.tv2000.app.playback.PlaybackCodecPreference
 import com.tv2000.app.playback.PlaybackCoordinator
 import com.tv2000.app.playback.RemoteResult
 import com.tv2000.app.scanner.ChannelScanner
@@ -37,9 +43,12 @@ import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private lateinit var coordinator: PlaybackCoordinator
+    private var playerView: PlayerView? = null
     private var storagePickerOpen = false
     private var smbSetupDialog: AlertDialog? = null
     private var smbSetupJob: Job? = null
+    private var usbDirectoryDialog: AlertDialog? = null
+    private var usbDirectoryJob: Job? = null
     private var smbDetailsDialog: AlertDialog? = null
     private var confirmationDialog: AlertDialog? = null
 
@@ -76,12 +85,17 @@ class MainActivity : ComponentActivity() {
         val database = Tv2000Database.get(applicationContext)
         val historyStore = PlaybackHistoryStore(applicationContext, database)
         val smbClient = SmbjMediaClient()
+        val codecPreference = PlaybackCodecPreference()
         val dataSourceFactory = Tv2000DataSource.Factory(
             context = applicationContext,
             smbClient = smbClient,
             resourceProvider = historyStore::cachedSmbResource,
+            onSourceOpening = codecPreference::onSourceOpening,
         )
-        val player = ExoPlayer.Builder(this)
+        val renderersFactory = DefaultRenderersFactory(this)
+            .setMediaCodecSelector(codecPreference.mediaCodecSelector)
+            .setEnableDecoderFallback(true)
+        val player = ExoPlayer.Builder(this, renderersFactory)
             .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
             .build()
         coordinator = PlaybackCoordinator(
@@ -105,13 +119,28 @@ class MainActivity : ComponentActivity() {
             },
         )
 
-        setContent {
-            val state = coordinator.state.collectAsStateWithLifecycle().value
-            Tv2000App(
-                state = state,
-                player = player,
-            )
+        // Keep video outside Compose so UI compatibility rendering never changes its Surface.
+        val playbackView = PlayerView(this).apply {
+            this.player = player
+            useController = false
+            resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+            setShutterBackgroundColor(Color.BLACK)
         }
+        playerView = playbackView
+        val overlayView = ComposeView(this).apply {
+            setBackgroundColor(Color.TRANSPARENT)
+            setContent {
+                val state = coordinator.state.collectAsStateWithLifecycle().value
+                Tv2000App(state = state)
+            }
+        }
+        setContentView(
+            FrameLayout(this).apply {
+                setBackgroundColor(Color.BLACK)
+                addView(playbackView, matchParentLayoutParams())
+                addView(overlayView, matchParentLayoutParams())
+            },
+        )
 
         lifecycleScope.launch {
             val hasStoredRoot = coordinator.restore()
@@ -132,11 +161,22 @@ class MainActivity : ComponentActivity() {
             super.onKeyDown(keyCode, event)
     }
 
+    private fun matchParentLayoutParams(): FrameLayout.LayoutParams =
+        FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT,
+        )
+
     private fun handleRemoteResult(result: RemoteResult): Boolean {
         return when (result) {
             RemoteResult.CONSUMED -> true
             RemoteResult.REQUEST_STORAGE -> {
                 openStoragePicker()
+                true
+            }
+
+            RemoteResult.REQUEST_USB_EDIT -> {
+                openUsbDirectoryDialog()
                 true
             }
 
@@ -177,9 +217,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         smbSetupJob?.cancel()
+        usbDirectoryJob?.cancel()
         smbSetupDialog?.dismiss()
+        usbDirectoryDialog?.dismiss()
         smbDetailsDialog?.dismiss()
         confirmationDialog?.dismiss()
+        playerView?.player = null
+        playerView = null
         coordinator.release()
         super.onDestroy()
     }
@@ -324,6 +368,61 @@ class MainActivity : ComponentActivity() {
         }
         addressField.requestFocus()
         addressField.setSelection(addressField.text.length)
+    }
+
+    private fun openUsbDirectoryDialog() {
+        if (usbDirectoryDialog?.isShowing == true || isFinishing) return
+
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.rgb(11, 13, 16))
+            val horizontal = 28.dp
+            setPadding(horizontal, 8.dp, horizontal, 0)
+        }
+        val directoryField = container.addField(
+            hint = getString(R.string.usb_video_directory_hint),
+            value = coordinator.usbVideoDirectory(),
+        )
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(R.string.usb_settings_title)
+            .setMessage(R.string.usb_settings_help)
+            .setView(container)
+            .setPositiveButton(R.string.save_changes, null)
+            .setNegativeButton(R.string.cancel, null)
+            .create()
+        usbDirectoryDialog = dialog
+        dialog.setOnShowListener {
+            val saveButton = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+            val cancelButton = dialog.getButton(AlertDialog.BUTTON_NEGATIVE)
+            saveButton.setOnClickListener {
+                val normalized = UsbStorageResolver.normalizeVideoDirectory(
+                    directoryField.text.toString(),
+                )
+                if (normalized == null) {
+                    directoryField.error = getString(R.string.invalid_usb_video_directory)
+                    directoryField.requestFocus()
+                    return@setOnClickListener
+                }
+
+                directoryField.error = null
+                saveButton.isEnabled = false
+                cancelButton.isEnabled = false
+                usbDirectoryJob = lifecycleScope.launch {
+                    coordinator.updateUsbVideoDirectory(normalized)
+                    usbDirectoryJob = null
+                    dialog.dismiss()
+                }
+            }
+        }
+        dialog.setOnDismissListener {
+            usbDirectoryJob?.cancel()
+            usbDirectoryJob = null
+            if (usbDirectoryDialog === dialog) usbDirectoryDialog = null
+        }
+        dialog.show()
+        styleTelevisionDialog(dialog)
+        directoryField.requestFocus()
+        directoryField.setSelection(directoryField.text.length)
     }
 
     private fun openSmbDetailsDialog(resource: SmbResource) {

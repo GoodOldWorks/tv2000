@@ -1,6 +1,7 @@
 package com.tv2000.app.storage
 
 import android.content.Context
+import android.content.Intent
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.Preferences
@@ -15,6 +16,8 @@ import com.tv2000.app.smb.DEFAULT_SMB_PORT
 import com.tv2000.app.smb.SmbMediaUri
 import com.tv2000.app.smb.SmbResource
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.security.MessageDigest
@@ -62,6 +65,16 @@ class PlaybackHistoryStore(
     suspend fun clearUsbRootUri() {
         context.tv2000DataStore.edit { preferences ->
             preferences.remove(USB_ROOT_URI)
+        }
+    }
+
+    suspend fun usbVideoDirectory(): String =
+        context.tv2000DataStore.data.first()[USB_VIDEO_DIRECTORY]
+            ?: UsbStorageResolver.DEFAULT_VIDEO_DIRECTORY
+
+    suspend fun saveUsbVideoDirectory(directory: String) {
+        context.tv2000DataStore.edit { preferences ->
+            preferences[USB_VIDEO_DIRECTORY] = directory
         }
     }
 
@@ -271,6 +284,31 @@ class PlaybackHistoryStore(
         }
     }
 
+    suspend fun resetAppData() {
+        withContext(Dispatchers.IO) {
+            database.clearAllTables()
+        }
+        context.tv2000DataStore.edit(MutablePreferences::clear)
+        cachedSmbResources = emptyList()
+        smbResourcesLoaded = false
+        activeSmbResourceId = null
+
+        context.contentResolver.persistedUriPermissions.forEach { permission ->
+            val flags =
+                (Intent.FLAG_GRANT_READ_URI_PERMISSION.takeIf { permission.isReadPermission } ?: 0) or
+                    (Intent.FLAG_GRANT_WRITE_URI_PERMISSION.takeIf {
+                        permission.isWritePermission
+                    } ?: 0)
+            if (flags == 0) return@forEach
+            runCatching {
+                context.contentResolver.releasePersistableUriPermission(
+                    permission.uri,
+                    flags,
+                )
+            }
+        }
+    }
+
     private fun historyKey(channelId: String) =
         stringPreferencesKey("$HISTORY_KEY_PREFIX${sha256(channelId)}")
 
@@ -282,6 +320,7 @@ class PlaybackHistoryStore(
     private companion object {
         val ROOT_URI = stringPreferencesKey("root_uri")
         val USB_ROOT_URI = stringPreferencesKey("usb_root_uri")
+        val USB_VIDEO_DIRECTORY = stringPreferencesKey("usb_video_directory")
         val SMB_RESOURCE = stringPreferencesKey("smb_resource")
         val SMB_RESOURCES = stringPreferencesKey("smb_resources")
         val LEGACY_ACTIVE_CHANNEL = stringPreferencesKey("active_channel")

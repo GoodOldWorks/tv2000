@@ -1,7 +1,6 @@
 package com.tv2000.app.ui
 
 import android.view.View
-import android.view.ViewGroup
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -33,11 +32,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
-import androidx.media3.common.util.UnstableApi
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.ui.AspectRatioFrameLayout
-import androidx.media3.ui.PlayerView
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import com.tv2000.app.R
@@ -51,12 +45,12 @@ import java.util.Locale
 @Composable
 fun Tv2000App(
     state: Tv2000UiState,
-    player: ExoPlayer,
 ) {
     ComposeRenderingCompatibility(
         enabled = state.channelListVisible ||
             state.mainMenuVisible ||
             state.resourceSettingsVisible ||
+            state.usbResourceActionsVisible ||
             state.smbResourceActionsVisible ||
             state.advancedSettingsVisible,
     )
@@ -65,12 +59,10 @@ fun Tv2000App(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color.Black),
+                .background(
+                    if (state.mode == AppMode.READY) Color.Transparent else Color.Black,
+                ),
         ) {
-            if (state.mode == AppMode.READY) {
-                PlayerSurface(player)
-            }
-
             when (state.mode) {
                 AppMode.LOADING,
                 AppMode.SCANNING,
@@ -114,6 +106,10 @@ fun Tv2000App(
                 ResourceManagement(state)
             }
 
+            if (state.usbResourceActionsVisible) {
+                UsbResourceActions(state)
+            }
+
             if (state.smbResourceActionsVisible) {
                 SmbResourceActions(state)
             }
@@ -127,14 +123,16 @@ fun Tv2000App(
 
 @Composable
 private fun ComposeRenderingCompatibility(enabled: Boolean) {
-    val composeView = LocalView.current
-    DisposableEffect(composeView, enabled) {
-        composeView.setLayerType(
+    // Some TV GPUs do not invalidate selection highlights reliably in hardware. This
+    // Compose view is a sibling above PlayerView, so its software layer cannot black out video.
+    val overlayView = LocalView.current
+    DisposableEffect(overlayView, enabled) {
+        overlayView.setLayerType(
             if (enabled) View.LAYER_TYPE_SOFTWARE else View.LAYER_TYPE_NONE,
             null,
         )
         onDispose {
-            composeView.setLayerType(View.LAYER_TYPE_NONE, null)
+            overlayView.setLayerType(View.LAYER_TYPE_NONE, null)
         }
     }
 }
@@ -164,29 +162,6 @@ private fun StorageFailureStatus(state: Tv2000UiState) {
         }
         ?: help
     CenteredStatus(title = title, subtitle = subtitle)
-}
-
-@Composable
-@androidx.annotation.OptIn(UnstableApi::class)
-private fun PlayerSurface(player: ExoPlayer) {
-    AndroidView(
-        modifier = Modifier.fillMaxSize(),
-        factory = { context ->
-            PlayerView(context).apply {
-                this.player = player
-                useController = false
-                resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
-                setShutterBackgroundColor(android.graphics.Color.BLACK)
-                layoutParams = ViewGroup.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                )
-            }
-        },
-        update = { view ->
-            if (view.player !== player) view.player = player
-        },
-    )
 }
 
 @Composable
@@ -231,7 +206,7 @@ private fun ChannelOverlay(state: Tv2000UiState) {
     ) {
         Column(
             modifier = Modifier
-                .background(Color(0xE6111418))
+                .background(Color(0xB3111418))
                 .padding(horizontal = 28.dp, vertical = 20.dp)
                 .width(440.dp),
         ) {
@@ -432,6 +407,16 @@ private fun resourceLabel(
 @Composable
 private fun ResourceManagement(state: Tv2000UiState) {
     val items = buildList {
+        if (state.usbResourceConfigured) {
+            add(
+                resourceLabel(
+                    type = stringResource(R.string.usb_resource),
+                    name = null,
+                    active = state.activeResourceKind == ResourceKind.USB,
+                    activeLabel = stringResource(R.string.active_resource),
+                ),
+            )
+        }
         add(stringResource(R.string.add_remote_resource))
         state.smbResources.forEach { resource ->
             add(
@@ -451,6 +436,19 @@ private fun ResourceManagement(state: Tv2000UiState) {
         items = items,
         selectedIndex = state.resourceSettingsSelection,
         note = stringResource(R.string.resource_management_note),
+    )
+}
+
+@Composable
+private fun UsbResourceActions(state: Tv2000UiState) {
+    val directory = state.usbVideoDirectory.ifBlank {
+        stringResource(R.string.usb_root_directory)
+    }
+    MenuPanel(
+        title = stringResource(R.string.usb_resource),
+        items = listOf(stringResource(R.string.edit_resource)),
+        selectedIndex = 0,
+        note = stringResource(R.string.usb_video_directory_note, directory),
     )
 }
 
@@ -490,6 +488,7 @@ private fun AdvancedSettings(state: Tv2000UiState) {
         stringResource(R.string.clear_index),
         stringResource(R.string.reset_current_channel_progress),
         stringResource(R.string.reset_all_channel_progress),
+        stringResource(R.string.reset_app_data),
     )
 
     MenuPanel(

@@ -16,6 +16,7 @@ internal data class IndexedMediaStoreChannel(
 
 internal fun indexMediaStoreVideos(
     records: List<MediaStoreVideoRecord>,
+    rootDirectory: String = "",
 ): List<IndexedMediaStoreChannel> =
     records
         .asSequence()
@@ -23,7 +24,10 @@ internal fun indexMediaStoreVideos(
             record.sizeBytes > 0L && isSupportedVideoFile(record.displayName)
         }
         .mapNotNull { record ->
-            val channelName = directChannelName(record.relativePath) ?: return@mapNotNull null
+            val channelName = directChannelName(
+                relativePath = record.relativePath,
+                rootDirectory = rootDirectory,
+            ) ?: return@mapNotNull null
             channelName to record
         }
         .groupBy(keySelector = { it.first }, valueTransform = { it.second })
@@ -40,16 +44,27 @@ internal fun indexMediaStoreVideos(
             NaturalOrderComparator.compare(left.name, right.name)
         }
 
-internal fun directChannelName(relativePath: String): String? {
-    val segments = relativePath
-        .replace('\\', '/')
-        .split('/')
-        .map(String::trim)
-        .filter(String::isNotEmpty)
+internal fun directChannelName(
+    relativePath: String,
+    rootDirectory: String = "",
+): String? {
+    val segments = pathSegments(relativePath)
+    val rootSegments = pathSegments(rootDirectory)
+    if (segments.size != rootSegments.size + 1) return null
+    if (!segments.take(rootSegments.size).map(String::lowercase)
+            .equals(rootSegments.map(String::lowercase))) {
+        return null
+    }
 
-    return segments.singleOrNull()
+    return segments.lastOrNull()
         ?.takeIf { channelName -> !channelName.startsWith('.') }
 }
+
+private fun pathSegments(path: String): List<String> = path
+    .replace('\\', '/')
+    .split('/')
+    .map(String::trim)
+    .filter(String::isNotEmpty)
 
 internal fun isSupportedVideoFile(fileName: String): Boolean {
     val extension = fileName.substringAfterLast('.', missingDelimiterValue = "")

@@ -16,6 +16,7 @@ import com.tv2000.app.scanner.ScanFailure
 import com.tv2000.app.scanner.ScanResult
 import com.tv2000.app.storage.MediaCatalogRepository
 import com.tv2000.app.storage.PlaybackHistoryStore
+import com.tv2000.app.storage.UsbStorageResolver
 import com.tv2000.app.smb.SmbMediaUri
 import com.tv2000.app.smb.SmbResource
 import com.tv2000.app.smb.SmbjMediaClient
@@ -59,6 +60,7 @@ class PlaybackCoordinator(
     private var pendingChannelIndex = 0
     private var playingChannelIndex: Int? = null
     private var configuredUsbRootUri: String? = null
+    private var configuredUsbVideoDirectory = UsbStorageResolver.DEFAULT_VIDEO_DIRECTORY
     private var configuredSmbResources: List<SmbResource> = emptyList()
     private var activeResourceKind: ResourceKind? = null
     private var activeResourceId: String? = null
@@ -82,6 +84,7 @@ class PlaybackCoordinator(
     suspend fun restore(): Boolean {
         configuredSmbResources = historyStore.smbResources()
         configuredUsbRootUri = historyStore.usbRootUri()
+        configuredUsbVideoDirectory = historyStore.usbVideoDirectory()
         val rootUri = historyStore.rootUri()
         if (rootUri == null) {
             mutableState.value = freshState(AppMode.NEEDS_STORAGE_ACCESS)
@@ -130,6 +133,25 @@ class PlaybackCoordinator(
         configuredUsbRootUri = rootUri.toString()
         historyStore.saveUsbRootUri(rootUri.toString())
         activateResource(ResourceKind.USB, USB_RESOURCE_ID, rootUri)
+    }
+
+    fun usbVideoDirectory(): String = configuredUsbVideoDirectory
+
+    suspend fun updateUsbVideoDirectory(directory: String) {
+        val normalized = requireNotNull(UsbStorageResolver.normalizeVideoDirectory(directory))
+        val changed = normalized != configuredUsbVideoDirectory
+        configuredUsbVideoDirectory = normalized
+        historyStore.saveUsbVideoDirectory(normalized)
+
+        if (changed && activeResourceKind == ResourceKind.USB) {
+            selectConfiguredUsbResource()
+        } else {
+            mutableState.value = mutableState.value.copy(
+                resourceSettingsVisible = true,
+                usbResourceActionsVisible = false,
+            )
+            refreshResourceConfiguration()
+        }
     }
 
     suspend fun addSmbResource(resource: SmbResource): AddSmbResourceResult {
@@ -240,6 +262,7 @@ class PlaybackCoordinator(
                 channelListVisible = false,
                 exitPromptVisible = false,
                 resourceSettingsVisible = false,
+                usbResourceActionsVisible = false,
                 smbResourceActionsVisible = false,
                 advancedSettingsVisible = false,
                 channelOverlayVisible = false,
@@ -253,6 +276,10 @@ class PlaybackCoordinator(
 
         if (current.resourceSettingsVisible) {
             return handleResourceSettingsKey(keyCode)
+        }
+
+        if (current.usbResourceActionsVisible) {
+            return handleUsbResourceActionsKey(keyCode)
         }
 
         if (current.smbResourceActionsVisible) {
@@ -360,6 +387,7 @@ class PlaybackCoordinator(
         backExitPromptJob?.cancel()
         player.removeListener(this)
         player.release()
+        smbClient.close()
     }
 
     suspend fun checkpoint() {
@@ -428,7 +456,13 @@ class PlaybackCoordinator(
     private suspend fun scanAndPlay(rootUri: Uri, restoringApp: Boolean): Boolean {
         mutableState.value = freshState(AppMode.SCANNING)
 
-        return when (val result = scanner.scan(context, rootUri)) {
+        return when (
+            val result = scanner.scan(
+                context = context,
+                rootUri = rootUri,
+                usbVideoDirectory = configuredUsbVideoDirectory,
+            )
+        ) {
             is ScanResult.Success -> {
                 val channels = runCatching {
                     catalogRepository.replaceSnapshot(rootUri, result.channels)
@@ -442,10 +476,12 @@ class PlaybackCoordinator(
 
                 if (channels.isEmpty()) {
                     mutableState.value = freshState(AppMode.NO_CONTENT)
+                    scheduleUsbMountSettlingScans(rootUri)
                     return true
                 }
 
                 showChannelsAndTune(channels, restoringApp)
+                scheduleUsbMountSettlingScans(rootUri)
                 true
             }
 
@@ -463,6 +499,7 @@ class PlaybackCoordinator(
                         scanFailure = result.reason,
                         scanDiagnostic = result.diagnostic,
                     )
+                    scheduleUsbMountSettlingScans(rootUri)
                     true
                 }
             }
@@ -534,39 +571,68 @@ class PlaybackCoordinator(
         }.getOrDefault(false)
     }
 
-    private fun scheduleBackgroundScan(rootUri: Uri) {
+    private fun scheduleUsbMountSettlingScans(rootUri: Uri) {
+        if (!SmbMediaUri.isSmb(rootUri)) {
+            scheduleBackgroundScan(
+                rootUri = rootUri,
+                firstDelayMs = USB_INITIAL_RESCAN_DELAY_MS,
+            )
+        }
+    }
+
+    private fun scheduleBackgroundScan(
+        rootUri: Uri,
+        firstDelayMs: Long = 0L,
+    ) {
         backgroundScanJob?.cancel()
         backgroundScanJob = scope.launch {
-            val scanResult = scanner.scan(context, rootUri)
-            if (!isSelectedResource(rootUri)) return@launch
+            val isSmb = SmbMediaUri.isSmb(rootUri)
+            val attempts = if (isSmb) 1 else USB_BACKGROUND_SCAN_ATTEMPTS
+            repeat(attempts) { attempt ->
+                val waitMs = if (attempt == 0) {
+                    firstDelayMs
+                } else {
+                    USB_BACKGROUND_SCAN_RETRY_DELAY_MS
+                }
+                if (waitMs > 0L) delay(waitMs)
 
-            val scannedChannels = when (scanResult) {
-                is ScanResult.Failure -> {
-                    if (SmbMediaUri.isSmb(rootUri)) {
-                        showBackgroundScanFailure(rootUri, scanResult)
+                val scanResult = scanner.scan(
+                    context = context,
+                    rootUri = rootUri,
+                    usbVideoDirectory = configuredUsbVideoDirectory,
+                )
+                if (!isSelectedResource(rootUri)) return@launch
+
+                val scannedChannels = when (scanResult) {
+                    is ScanResult.Failure -> {
+                        if (isSmb) {
+                            showBackgroundScanFailure(rootUri, scanResult)
+                            return@launch
+                        }
+                        return@repeat
                     }
-                    return@launch
+
+                    is ScanResult.Success -> scanResult.channels
                 }
 
-                is ScanResult.Success -> scanResult.channels
-            }
-
-            if (scannedChannels.isEmpty()) {
-                if (SmbMediaUri.isSmb(rootUri)) {
-                    runCatching {
-                        catalogRepository.replaceSnapshot(rootUri, emptyList())
+                if (scannedChannels.isEmpty()) {
+                    if (isSmb) {
+                        runCatching {
+                            catalogRepository.replaceSnapshot(rootUri, emptyList())
+                        }
+                        showBackgroundNoContent(rootUri)
+                        return@launch
                     }
-                    showBackgroundNoContent(rootUri)
+                    return@repeat
                 }
-                return@launch
+
+                val refreshedChannels = runCatching {
+                    catalogRepository.replaceSnapshot(rootUri, scannedChannels)
+                }.getOrNull() ?: return@repeat
+                if (refreshedChannels.isEmpty()) return@repeat
+
+                applyBackgroundRefresh(rootUri, refreshedChannels)
             }
-
-            val refreshedChannels = runCatching {
-                catalogRepository.replaceSnapshot(rootUri, scannedChannels)
-            }.getOrNull() ?: return@launch
-            if (refreshedChannels.isEmpty()) return@launch
-
-            applyBackgroundRefresh(rootUri, refreshedChannels)
         }
     }
 
@@ -603,7 +669,14 @@ class PlaybackCoordinator(
     ) {
         if (!isSelectedResource(rootUri)) return
         val current = mutableState.value
-        if (current.mode != AppMode.READY) return
+        if (current.mode != AppMode.READY) {
+            if (current.mode == AppMode.NO_CONTENT ||
+                current.mode == AppMode.STORAGE_UNAVAILABLE
+            ) {
+                showChannelsAndTune(refreshedChannels, restoringApp = false)
+            }
+            return
+        }
 
         val currentChannel = current.currentChannel ?: return
         val currentMediaId = player.currentMediaItem?.mediaId
@@ -814,6 +887,14 @@ class PlaybackCoordinator(
             KeyEvent.KEYCODE_DPAD_CENTER,
             KeyEvent.KEYCODE_ENTER,
             -> when (val action = actions[current.resourceSettingsSelection.coerceIn(actions.indices)]) {
+                ResourceManagementAction.MANAGE_USB -> {
+                    mutableState.value = current.copy(
+                        resourceSettingsVisible = false,
+                        usbResourceActionsVisible = true,
+                    )
+                    RemoteResult.CONSUMED
+                }
+
                 ResourceManagementAction.ADD_REMOTE_RESOURCE -> {
                     RemoteResult.REQUEST_SMB_SETUP
                 }
@@ -842,6 +923,25 @@ class PlaybackCoordinator(
 
             else -> RemoteResult.NOT_HANDLED
         }
+    }
+
+    private fun handleUsbResourceActionsKey(keyCode: Int): RemoteResult = when (keyCode) {
+        KeyEvent.KEYCODE_DPAD_CENTER,
+        KeyEvent.KEYCODE_ENTER,
+        -> RemoteResult.REQUEST_USB_EDIT
+
+        KeyEvent.KEYCODE_BACK -> {
+            mutableState.value = mutableState.value.copy(
+                usbResourceActionsVisible = false,
+                resourceSettingsVisible = true,
+                resourceSettingsSelection = resourceSettingsActions()
+                    .indexOf(ResourceManagementAction.MANAGE_USB)
+                    .coerceAtLeast(0),
+            )
+            RemoteResult.CONSUMED
+        }
+
+        else -> RemoteResult.NOT_HANDLED
     }
 
     private fun handleSmbResourceActionsKey(keyCode: Int): RemoteResult {
@@ -914,7 +1014,10 @@ class PlaybackCoordinator(
                 mutableState.value = current.copy(
                     smbResourceActionsVisible = false,
                     resourceSettingsVisible = true,
-                    resourceSettingsSelection = (resourceIndex + 1).coerceAtLeast(0),
+                    resourceSettingsSelection = resourceSettingsActions()
+                        .indexOf(ResourceManagementAction.MANAGE_SMB(resource.id))
+                        .takeIf { it >= 0 }
+                        ?: resourceIndex.coerceAtLeast(0),
                 )
                 RemoteResult.CONSUMED
             }
@@ -997,6 +1100,7 @@ class PlaybackCoordinator(
     }
 
     private fun resourceSettingsActions(): List<ResourceManagementAction> = buildList {
+        if (configuredUsbRootUri != null) add(ResourceManagementAction.MANAGE_USB)
         add(ResourceManagementAction.ADD_REMOTE_RESOURCE)
         configuredSmbResources.forEach { resource ->
             add(ResourceManagementAction.MANAGE_SMB(resource.id))
@@ -1044,6 +1148,7 @@ class PlaybackCoordinator(
             activeResourceKind = activeResourceKind,
             activeResourceId = activeResourceId,
             usbResourceConfigured = configuredUsbRootUri != null,
+            usbVideoDirectory = configuredUsbVideoDirectory,
             smbResources = configuredSmbResources.map { resource ->
                 SmbResourceSummary(resource.id, resource.displayName)
             },
@@ -1057,6 +1162,7 @@ class PlaybackCoordinator(
                 AdvancedSettingsAction.CLEAR_INDEX -> clearAndRebuildIndex()
                 AdvancedSettingsAction.RESET_CURRENT_CHANNEL -> resetCurrentChannelProgress()
                 AdvancedSettingsAction.RESET_ALL_CHANNELS -> resetAllChannelProgress()
+                AdvancedSettingsAction.RESET_APP_DATA -> resetAppData()
             }
         }
     }
@@ -1073,6 +1179,10 @@ class PlaybackCoordinator(
 
             AdvancedSettingsAction.RESET_ALL_CHANNELS -> {
                 R.string.confirm_reset_all_title to R.string.confirm_reset_all_message
+            }
+
+            AdvancedSettingsAction.RESET_APP_DATA -> {
+                R.string.confirm_reset_app_data_title to R.string.confirm_reset_app_data_message
             }
         }
         requestConfirmation(
@@ -1127,6 +1237,35 @@ class PlaybackCoordinator(
         showActionFeedback(R.string.all_channel_progress_reset)
     }
 
+    private suspend fun resetAppData() {
+        backgroundScanJob?.cancel()
+        backgroundScanJob = null
+        tuneJob?.cancel()
+        tuneJob = null
+        overlayJob?.cancel()
+        overlayJob = null
+        cancelDirectionalGestures()
+        cancelBackExitPrompt()
+        player.stop()
+        player.clearMediaItems()
+        playingChannelIndex = null
+        mutableState.value = freshState(AppMode.LOADING)
+
+        historyWriteMutex.withLock {
+            historyStore.resetAppData()
+        }
+
+        configuredUsbRootUri = null
+        configuredUsbVideoDirectory = UsbStorageResolver.DEFAULT_VIDEO_DIRECTORY
+        configuredSmbResources = emptyList()
+        activeResourceKind = null
+        activeResourceId = null
+        pendingChannelIndex = 0
+        pendingConfirmationAction = null
+        pendingConfirmationRequest = null
+        mutableState.value = freshState(AppMode.NEEDS_STORAGE_ACCESS)
+    }
+
     private fun showActionFeedback(messageRes: Int) {
         mutableState.value = mutableState.value.copy(
             channelOverlayVisible = true,
@@ -1151,6 +1290,7 @@ class PlaybackCoordinator(
         activeResourceKind = activeResourceKind,
         activeResourceId = activeResourceId,
         usbResourceConfigured = configuredUsbRootUri != null,
+        usbVideoDirectory = configuredUsbVideoDirectory,
         smbResources = configuredSmbResources.map { resource ->
             SmbResourceSummary(resource.id, resource.displayName)
         },
@@ -1481,6 +1621,9 @@ class PlaybackCoordinator(
         const val DIRECTIONAL_DOUBLE_PRESS_TIMEOUT_MS = 350L
         const val PREVIOUS_EPISODE_POSITION_THRESHOLD_MS = 5_000L
         const val BACK_EXIT_PROMPT_DURATION_MS = 3_000L
+        const val USB_INITIAL_RESCAN_DELAY_MS = 2_000L
+        const val USB_BACKGROUND_SCAN_RETRY_DELAY_MS = 3_000L
+        const val USB_BACKGROUND_SCAN_ATTEMPTS = 3
         const val USB_RESOURCE_ID = "usb"
     }
 }
@@ -1493,6 +1636,7 @@ private sealed interface MainMenuAction {
 }
 
 private sealed interface ResourceManagementAction {
+    data object MANAGE_USB : ResourceManagementAction
     data object ADD_REMOTE_RESOURCE : ResourceManagementAction
     data class MANAGE_SMB(val resourceId: String) : ResourceManagementAction
 }

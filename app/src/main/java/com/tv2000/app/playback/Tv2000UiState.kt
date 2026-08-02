@@ -15,6 +15,7 @@ data class Tv2000UiState(
     val mainMenuVisible: Boolean = false,
     val resourceSettingsSelection: Int = 0,
     val resourceSettingsVisible: Boolean = false,
+    val usbResourceActionsVisible: Boolean = false,
     val smbResourceActionsSelection: Int = 0,
     val smbResourceActionsVisible: Boolean = false,
     val managedSmbResourceId: String? = null,
@@ -23,6 +24,7 @@ data class Tv2000UiState(
     val activeResourceKind: ResourceKind? = null,
     val activeResourceId: String? = null,
     val usbResourceConfigured: Boolean = false,
+    val usbVideoDirectory: String = "TV2000",
     val smbResources: List<SmbResourceSummary> = emptyList(),
     val channelOverlayVisible: Boolean = false,
     val channelOverlayPositionMs: Long = 0L,
@@ -49,6 +51,7 @@ enum class AppMode {
 enum class RemoteResult {
     CONSUMED,
     REQUEST_STORAGE,
+    REQUEST_USB_EDIT,
     REQUEST_SMB_SETUP,
     REQUEST_SMB_VIEW,
     REQUEST_SMB_EDIT,
@@ -61,6 +64,7 @@ enum class AdvancedSettingsAction {
     CLEAR_INDEX,
     RESET_CURRENT_CHANNEL,
     RESET_ALL_CHANNELS,
+    RESET_APP_DATA,
 }
 
 enum class ResourceKind {

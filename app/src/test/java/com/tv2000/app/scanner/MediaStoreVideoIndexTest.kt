@@ -67,6 +67,30 @@ class MediaStoreVideoIndexTest {
         assertNull(directChannelName(".hidden/"))
     }
 
+    @Test
+    fun `indexes direct channels below configured video directory`() {
+        val channels = indexMediaStoreVideos(
+            records = listOf(
+                video(id = 1, path = "TV2000/猫和老鼠/", name = "001.mp4"),
+                video(id = 2, path = "系统目录/", name = "system.mp4"),
+                video(id = 3, path = "TV2000/猫和老鼠/第二季/", name = "002.mp4"),
+            ),
+            rootDirectory = "TV2000",
+        )
+
+        assertEquals(listOf("猫和老鼠"), channels.map { it.name })
+        assertEquals(listOf("001.mp4"), channels.single().episodes.map { it.displayName })
+    }
+
+    @Test
+    fun `configured directory matching is case insensitive`() {
+        assertEquals(
+            "猫和老鼠",
+            directChannelName("tv2000/猫和老鼠/", rootDirectory = "TV2000"),
+        )
+        assertNull(directChannelName("其他/猫和老鼠/", rootDirectory = "TV2000"))
+    }
+
     private fun video(
         id: Long,
         path: String,
