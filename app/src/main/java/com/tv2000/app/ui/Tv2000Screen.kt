@@ -1,5 +1,6 @@
 package com.tv2000.app.ui
 
+import android.view.View
 import android.view.ViewGroup
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -14,13 +15,19 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -34,6 +41,7 @@ import androidx.media3.ui.PlayerView
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import com.tv2000.app.R
+import com.tv2000.app.model.Channel
 import com.tv2000.app.playback.AppMode
 import com.tv2000.app.playback.ResourceKind
 import com.tv2000.app.playback.Tv2000UiState
@@ -45,6 +53,14 @@ fun Tv2000App(
     state: Tv2000UiState,
     player: ExoPlayer,
 ) {
+    ComposeRenderingCompatibility(
+        enabled = state.channelListVisible ||
+            state.mainMenuVisible ||
+            state.resourceSettingsVisible ||
+            state.smbResourceActionsVisible ||
+            state.advancedSettingsVisible,
+    )
+
     MaterialTheme {
         Box(
             modifier = Modifier
@@ -105,6 +121,20 @@ fun Tv2000App(
             if (state.advancedSettingsVisible) {
                 AdvancedSettings(state)
             }
+        }
+    }
+}
+
+@Composable
+private fun ComposeRenderingCompatibility(enabled: Boolean) {
+    val composeView = LocalView.current
+    DisposableEffect(composeView, enabled) {
+        composeView.setLayerType(
+            if (enabled) View.LAYER_TYPE_SOFTWARE else View.LAYER_TYPE_NONE,
+            null,
+        )
+        onDispose {
+            composeView.setLayerType(View.LAYER_TYPE_NONE, null)
         }
     }
 }
@@ -268,9 +298,19 @@ internal fun formatPlaybackTime(positionMs: Long): String {
 @Composable
 private fun ChannelList(state: Tv2000UiState) {
     val listState = rememberLazyListState()
+    val panelRepaintToken = rememberPanelRepaintToken(state.channelListSelection)
+    val rows = state.channels.mapIndexed { index, channel ->
+        ChannelListRow(
+            channel = channel,
+            selected = index == state.channelListSelection,
+        )
+    }
     LaunchedEffect(state.channelListSelection, state.channels.size) {
-        if (state.channelListSelection in state.channels.indices) {
-            listState.animateScrollToItem(state.channelListSelection)
+        val selectionVisible = listState.layoutInfo.visibleItemsInfo.any { item ->
+            item.index == state.channelListSelection
+        }
+        if (state.channelListSelection in state.channels.indices && !selectionVisible) {
+            listState.scrollToItem(state.channelListSelection)
         }
     }
 
@@ -278,7 +318,7 @@ private fun ChannelList(state: Tv2000UiState) {
         modifier = Modifier
             .fillMaxHeight()
             .width(520.dp)
-            .background(Color(0xF20B0D10))
+            .background(panelBackgroundFor(panelRepaintToken))
             .padding(horizontal = 32.dp, vertical = 36.dp),
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
@@ -296,11 +336,12 @@ private fun ChannelList(state: Tv2000UiState) {
                 state = listState,
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                itemsIndexed(
-                    items = state.channels,
-                    key = { _, channel -> channel.id },
-                ) { index, channel ->
-                    val selected = index == state.channelListSelection
+                items(
+                    items = rows,
+                    key = { row -> row.channel.id },
+                ) { row ->
+                    val channel = row.channel
+                    val selected = row.selected
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -468,9 +509,21 @@ private fun MenuPanel(
     disabledIndices: Set<Int> = emptySet(),
 ) {
     val listState = rememberLazyListState()
+    val panelRepaintToken = rememberPanelRepaintToken(selectedIndex)
+    val rows = items.mapIndexed { index, label ->
+        MenuListRow(
+            index = index,
+            label = label,
+            selected = index == selectedIndex,
+            disabled = index in disabledIndices,
+        )
+    }
     LaunchedEffect(selectedIndex, items.size) {
-        if (selectedIndex in items.indices) {
-            listState.animateScrollToItem(selectedIndex)
+        val selectionVisible = listState.layoutInfo.visibleItemsInfo.any { item ->
+            item.index == selectedIndex
+        }
+        if (selectedIndex in items.indices && !selectionVisible) {
+            listState.scrollToItem(selectedIndex)
         }
     }
 
@@ -484,7 +537,7 @@ private fun MenuPanel(
             modifier = Modifier
                 .width(680.dp)
                 .fillMaxHeight(0.88f)
-                .background(Color(0xF20B0D10))
+                .background(panelBackgroundFor(panelRepaintToken))
                 .padding(horizontal = 40.dp, vertical = 36.dp),
         ) {
             Text(
@@ -499,11 +552,14 @@ private fun MenuPanel(
                 state = listState,
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                itemsIndexed(items) { index, label ->
-                    val selected = index == selectedIndex
-                    val disabled = index in disabledIndices
+                items(
+                    items = rows,
+                    key = { row -> row.index },
+                ) { row ->
+                    val selected = row.selected
+                    val disabled = row.disabled
                     Text(
-                        text = label,
+                        text = row.label,
                         modifier = Modifier
                             .fillMaxWidth()
                             .background(
@@ -520,7 +576,11 @@ private fun MenuPanel(
                             else -> Color(0xFFEDE7D5)
                         },
                         fontSize = 24.sp,
-                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                        fontWeight = if (selected) {
+                            FontWeight.SemiBold
+                        } else {
+                            FontWeight.Normal
+                        },
                     )
                 }
             }
@@ -534,4 +594,31 @@ private fun MenuPanel(
             }
         }
     }
+}
+
+private data class ChannelListRow(
+    val channel: Channel,
+    val selected: Boolean,
+)
+
+private data class MenuListRow(
+    val index: Int,
+    val label: String,
+    val selected: Boolean,
+    val disabled: Boolean,
+)
+
+@Composable
+private fun rememberPanelRepaintToken(selection: Int): Int {
+    var repaintToken by remember { mutableIntStateOf(0) }
+    LaunchedEffect(selection) {
+        repaintToken = repaintToken xor 1
+    }
+    return repaintToken
+}
+
+private fun panelBackgroundFor(repaintToken: Int): Color = if (repaintToken == 0) {
+    Color(0xF20B0D10)
+} else {
+    Color(0xF20B0D11)
 }
