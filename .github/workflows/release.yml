@@ -1,0 +1,87 @@
+name: Release APK
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Restore signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.TV2000_RELEASE_KEYSTORE_BASE64 }}
+        run: |
+          test -n "$KEYSTORE_BASE64"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/tv2000-release.jks"
+
+      - name: Build signed APK
+        env:
+          TV2000_RELEASE_KEYSTORE: ${{ runner.temp }}/tv2000-release.jks
+          TV2000_RELEASE_STORE_PASSWORD: ${{ secrets.TV2000_RELEASE_STORE_PASSWORD }}
+          TV2000_RELEASE_KEY_ALIAS: ${{ secrets.TV2000_RELEASE_KEY_ALIAS }}
+          TV2000_RELEASE_KEY_PASSWORD: ${{ secrets.TV2000_RELEASE_KEY_PASSWORD }}
+        run: |
+          for required in \
+            TV2000_RELEASE_STORE_PASSWORD \
+            TV2000_RELEASE_KEY_ALIAS \
+            TV2000_RELEASE_KEY_PASSWORD
+          do
+            if [ -z "${!required}" ]; then
+              echo "::error::$required is not configured"
+              exit 1
+            fi
+          done
+          ./gradlew testDebugUnitTest lintDebug assembleRelease --no-daemon
+
+      - name: Verify release metadata
+        run: |
+          metadata=app/build/outputs/apk/release/output-metadata.json
+          expected_version="${GITHUB_REF_NAME#v}"
+          actual_version="$(jq -r '.elements[0].versionName' "$metadata")"
+          apk_file="$(jq -r '.elements[0].outputFile' "$metadata")"
+
+          if [ "$actual_version" != "$expected_version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match app version $actual_version"
+            exit 1
+          fi
+
+          release_apk="app/build/outputs/apk/release/$apk_file"
+          test -f "$release_apk"
+          echo "RELEASE_APK=$release_apk" >> "$GITHUB_ENV"
+
+      - name: Prepare release files
+        run: |
+          mkdir -p dist
+          cp "$RELEASE_APK" dist/TV2000.apk
+          sha256sum dist/TV2000.apk > dist/TV2000.apk.sha256
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/TV2000.apk \
+            dist/TV2000.apk.sha256 \
+            --verify-tag \
+            --generate-notes \
+            --title "TV2000 $GITHUB_REF_NAME"

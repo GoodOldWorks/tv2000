@@ -4,6 +4,11 @@ plugins {
     alias(libs.plugins.compose.compiler)
 }
 
+val releaseKeystorePath = providers.environmentVariable("TV2000_RELEASE_KEYSTORE").orNull
+val releaseStorePassword = providers.environmentVariable("TV2000_RELEASE_STORE_PASSWORD").orNull
+val releaseKeyAlias = providers.environmentVariable("TV2000_RELEASE_KEY_ALIAS").orNull
+val releaseKeyPassword = providers.environmentVariable("TV2000_RELEASE_KEY_PASSWORD").orNull
+
 android {
     namespace = "com.tv2000.app"
     compileSdk = 37
@@ -13,15 +18,33 @@ android {
         minSdk = 28
         targetSdk = 37
         versionCode = 1
-        versionName = "0.1.0-dev"
+        versionName = "0.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    signingConfigs {
+        releaseKeystorePath?.let { keystorePath ->
+            create("release") {
+                storeFile = file(keystorePath)
+                storePassword = requireNotNull(releaseStorePassword) {
+                    "TV2000_RELEASE_STORE_PASSWORD is required for a signed release"
+                }
+                keyAlias = requireNotNull(releaseKeyAlias) {
+                    "TV2000_RELEASE_KEY_ALIAS is required for a signed release"
+                }
+                keyPassword = requireNotNull(releaseKeyPassword) {
+                    "TV2000_RELEASE_KEY_PASSWORD is required for a signed release"
+                }
+            }
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
+            signingConfig = signingConfigs.findByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
