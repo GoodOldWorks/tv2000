@@ -4,6 +4,7 @@ import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.os.Bundle
 import android.text.InputType
@@ -24,6 +25,7 @@ import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.PlayerView
 import com.tv2000.app.playback.AddSmbResourceResult
 import com.tv2000.app.playback.PlaybackCodecPreference
@@ -125,6 +127,17 @@ class MainActivity : ComponentActivity() {
             useController = false
             resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
             setShutterBackgroundColor(Color.BLACK)
+            subtitleView?.setStyle(
+                CaptionStyleCompat(
+                    Color.WHITE,
+                    Color.TRANSPARENT,
+                    Color.TRANSPARENT,
+                    CaptionStyleCompat.EDGE_TYPE_OUTLINE,
+                    Color.BLACK,
+                    Typeface.DEFAULT,
+                ),
+            )
+            subtitleView?.setApplyEmbeddedStyles(false)
         }
         playerView = playbackView
         val overlayView = ComposeView(this).apply {
