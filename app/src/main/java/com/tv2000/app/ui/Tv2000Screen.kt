@@ -1,6 +1,7 @@
 package com.tv2000.app.ui
 
 import android.view.View
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -26,7 +27,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -66,13 +69,8 @@ fun Tv2000App(
             when (state.mode) {
                 AppMode.LOADING,
                 AppMode.SCANNING,
-                -> CenteredStatus(
-                    title = if (state.mode == AppMode.LOADING) {
-                        stringResource(R.string.app_name)
-                    } else {
-                        stringResource(R.string.scanning_usb)
-                    },
-                    subtitle = null,
+                -> StartupStatus(
+                    scanning = state.mode == AppMode.SCANNING,
                 )
 
                 AppMode.NEEDS_STORAGE_ACCESS -> CenteredStatus(
@@ -117,6 +115,33 @@ fun Tv2000App(
             if (state.advancedSettingsVisible) {
                 AdvancedSettings(state)
             }
+        }
+    }
+}
+
+@Composable
+private fun StartupStatus(scanning: Boolean) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF15120F)),
+    ) {
+        Image(
+            painter = painterResource(R.drawable.tv2000_splash),
+            contentDescription = null,
+            modifier = Modifier.fillMaxSize(),
+            contentScale = ContentScale.Crop,
+        )
+        if (scanning) {
+            Text(
+                text = stringResource(R.string.scanning_usb),
+                color = Color(0xFFE8D9B8),
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 20.dp),
+            )
         }
     }
 }

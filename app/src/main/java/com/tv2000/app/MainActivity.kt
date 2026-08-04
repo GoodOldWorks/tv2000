@@ -15,7 +15,6 @@ import android.os.Bundle
 import android.os.SystemClock
 import android.text.InputType
 import android.util.Log
-import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
@@ -23,8 +22,8 @@ import android.view.ViewTreeObserver
 import android.view.WindowManager
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
@@ -119,15 +118,13 @@ class MainActivity : ComponentActivity() {
         logStartupTimestamp(APP_LAUNCH_STARTED, launchStartedElapsedMs)
 
         rootView = FrameLayout(this).apply {
-            setBackgroundColor(Color.BLACK)
+            setBackgroundColor(Color.rgb(21, 18, 15))
         }
-        startupView = TextView(this).apply {
-            gravity = Gravity.CENTER
-            setBackgroundColor(Color.BLACK)
-            setTextColor(Color.rgb(237, 231, 213))
-            text = getString(R.string.app_name)
-            textSize = 36f
-            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+        startupView = ImageView(this).apply {
+            setBackgroundColor(Color.rgb(21, 18, 15))
+            setImageResource(R.drawable.tv2000_splash)
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            contentDescription = getString(R.string.app_name)
         }
         rootView.addView(startupView, matchParentLayoutParams())
         setContentView(rootView)
