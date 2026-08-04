@@ -7,6 +7,7 @@ import com.tv2000.app.model.Episode
 import com.tv2000.app.model.ScannedChannel
 import com.tv2000.app.storage.db.ChannelEntity
 import com.tv2000.app.storage.db.EpisodeEntity
+import com.tv2000.app.storage.db.MediaCatalogDao
 import com.tv2000.app.storage.db.StorageVolumeEntity
 import com.tv2000.app.storage.db.Tv2000Database
 
@@ -19,11 +20,11 @@ class MediaCatalogRepository(
         scannedChannels: List<ScannedChannel>,
     ): List<Channel> {
         val rootUriString = rootUri.toString()
-        val volumeId = StableMediaIds.volume(rootUriString)
+        val dao = database.mediaCatalogDao()
+        val volumeId = resolveVolumeId(rootUriString, dao)
         val now = clock()
 
         database.withTransaction {
-            val dao = database.mediaCatalogDao()
             val existingVolume = dao.storageVolume(volumeId)
             val existingChannels = dao.channelsForVolume(volumeId)
             val existingNumbers = existingChannels.associate {
@@ -42,7 +43,7 @@ class MediaCatalogRepository(
             )
 
             dao.markAllVolumesOffline()
-            dao.markAllChannelsInvisible()
+            dao.invalidateChannelsForVolume(volumeId)
             dao.upsertStorageVolume(
                 StorageVolumeEntity(
                     volumeId = volumeId,
@@ -93,12 +94,12 @@ class MediaCatalogRepository(
             }
         }
 
-        return loadVisibleChannels()
+        return loadVisibleChannels(volumeId)
     }
 
     suspend fun loadIndexedChannels(rootUri: Uri): List<Channel> {
-        val volumeId = StableMediaIds.volume(rootUri.toString())
         val dao = database.mediaCatalogDao()
+        val volumeId = resolveVolumeId(rootUri.toString(), dao)
         return dao.visibleChannelsForVolume(volumeId).map { channel ->
             channel.toModel(
                 episodes = dao.availableEpisodes(channel.channelId),
@@ -107,13 +108,35 @@ class MediaCatalogRepository(
     }
 
     suspend fun invalidateIndex(rootUri: Uri) {
-        val volumeId = StableMediaIds.volume(rootUri.toString())
-        database.mediaCatalogDao().invalidateChannelsForVolume(volumeId)
+        val dao = database.mediaCatalogDao()
+        val volumeId = resolveVolumeId(rootUri.toString(), dao)
+        dao.invalidateChannelsForVolume(volumeId)
     }
 
-    private suspend fun loadVisibleChannels(): List<Channel> {
+    suspend fun markVolumeOffline(rootUri: Uri) {
         val dao = database.mediaCatalogDao()
-        return dao.visibleChannels().map { channel ->
+        val volumeId = resolveVolumeId(rootUri.toString(), dao)
+        dao.markVolumeOffline(volumeId)
+    }
+
+    private suspend fun resolveVolumeId(
+        rootUri: String,
+        dao: MediaCatalogDao,
+    ): String {
+        val volumeIdentity = UsbStorageResolver.volumeIdentity(rootUri)
+        val canonicalSource = volumeIdentity.takeIf { identity ->
+            identity.startsWith(UUID_IDENTITY_PREFIX)
+        } ?: rootUri
+        val canonicalVolumeId = StableMediaIds.volume(canonicalSource)
+        dao.storageVolume(canonicalVolumeId)?.let { return it.volumeId }
+        return dao.storageVolumes().firstOrNull { storedVolume ->
+            UsbStorageResolver.volumeIdentity(storedVolume.rootUri) == volumeIdentity
+        }?.volumeId ?: canonicalVolumeId
+    }
+
+    private suspend fun loadVisibleChannels(volumeId: String): List<Channel> {
+        val dao = database.mediaCatalogDao()
+        return dao.visibleChannelsForVolume(volumeId).map { channel ->
             channel.toModel(
                 episodes = dao.availableEpisodes(channel.channelId),
             )
@@ -139,5 +162,6 @@ class MediaCatalogRepository(
 
     private companion object {
         const val SORT_KEY_WIDTH = 10
+        const val UUID_IDENTITY_PREFIX = "uuid:"
     }
 }

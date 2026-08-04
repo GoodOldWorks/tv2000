@@ -351,6 +351,7 @@ sealed interface ScanResult {
 enum class ScanFailure {
     PERMISSION_LOST,
     UNAVAILABLE,
+    USB_REMOVED,
     SMB_AUTHENTICATION,
     SMB_SHARE_NOT_FOUND,
     SMB_CONNECTION,

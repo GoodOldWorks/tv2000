@@ -139,6 +139,14 @@ private fun ComposeRenderingCompatibility(enabled: Boolean) {
 
 @Composable
 private fun StorageFailureStatus(state: Tv2000UiState) {
+    if (state.scanFailure == ScanFailure.USB_REMOVED) {
+        CenteredStatus(
+            title = stringResource(R.string.insert_original_or_another_usb),
+            subtitle = null,
+        )
+        return
+    }
+
     val title = when (state.scanFailure) {
         ScanFailure.SMB_AUTHENTICATION -> stringResource(R.string.smb_authentication_failed)
         ScanFailure.SMB_SHARE_NOT_FOUND -> stringResource(R.string.smb_share_not_found)

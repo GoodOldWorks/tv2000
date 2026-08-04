@@ -1,12 +1,16 @@
 package com.tv2000.app
 
 import android.app.AlertDialog
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
 import android.text.InputType
@@ -47,6 +51,7 @@ import com.tv2000.app.smb.SmbResource
 import com.tv2000.app.smb.Tv2000DataSource
 import com.tv2000.app.ui.Tv2000App
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -63,8 +68,21 @@ class MainActivity : ComponentActivity() {
     private var smbSetupJob: Job? = null
     private var usbDirectoryDialog: AlertDialog? = null
     private var usbDirectoryJob: Job? = null
+    private var usbReconciliationJob: Job? = null
+    private var usbMonitoringReady = false
+    private var mediaReceiverRegistered = false
     private var smbDetailsDialog: AlertDialog? = null
     private var confirmationDialog: AlertDialog? = null
+
+    private val mediaMountReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val removedRoot = intent.data.takeIf {
+                intent.action in USB_REMOVAL_ACTIONS
+            }
+            Log.i(USB_LOG_TAG, "media_action=${intent.action} root=$removedRoot")
+            scheduleUsbVolumeReconciliation(removedRoot)
+        }
+    }
 
     private val storagePicker = registerForActivityResult(
         ActivityResultContracts.OpenDocumentTree(),
@@ -206,7 +224,12 @@ class MainActivity : ComponentActivity() {
                 return@launch
             }
             val hasStoredRoot = coordinator.restore()
-            if (!hasStoredRoot) openStoragePicker()
+            usbMonitoringReady = true
+            if (hasStoredRoot) {
+                scheduleUsbVolumeReconciliation()
+            } else {
+                openStoragePicker()
+            }
         }
     }
 
@@ -332,10 +355,15 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        if (::coordinator.isInitialized) coordinator.onForeground()
+        startUsbVolumeMonitoring()
+        if (::coordinator.isInitialized) {
+            if (usbMonitoringReady) scheduleUsbVolumeReconciliation()
+            coordinator.onForeground()
+        }
     }
 
     override fun onStop() {
+        stopUsbVolumeMonitoring()
         if (::coordinator.isInitialized) coordinator.onBackground()
         super.onStop()
     }
@@ -343,6 +371,7 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         smbSetupJob?.cancel()
         usbDirectoryJob?.cancel()
+        usbReconciliationJob?.cancel()
         smbSetupDialog?.dismiss()
         usbDirectoryDialog?.dismiss()
         smbDetailsDialog?.dismiss()
@@ -351,6 +380,61 @@ class MainActivity : ComponentActivity() {
         playerView = null
         if (::coordinator.isInitialized) coordinator.release()
         super.onDestroy()
+    }
+
+    private fun startUsbVolumeMonitoring() {
+        if (mediaReceiverRegistered) return
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_MEDIA_CHECKING)
+            addAction(Intent.ACTION_MEDIA_MOUNTED)
+            addAction(Intent.ACTION_MEDIA_EJECT)
+            addAction(Intent.ACTION_MEDIA_UNMOUNTED)
+            addAction(Intent.ACTION_MEDIA_REMOVED)
+            addAction(Intent.ACTION_MEDIA_BAD_REMOVAL)
+            addDataScheme("file")
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(mediaMountReceiver, filter, RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("DEPRECATION")
+            registerReceiver(mediaMountReceiver, filter)
+        }
+        mediaReceiverRegistered = true
+    }
+
+    private fun stopUsbVolumeMonitoring() {
+        usbReconciliationJob?.cancel()
+        usbReconciliationJob = null
+        if (!mediaReceiverRegistered) return
+        unregisterReceiver(mediaMountReceiver)
+        mediaReceiverRegistered = false
+    }
+
+    private fun scheduleUsbVolumeReconciliation(removedRoot: Uri? = null) {
+        if (!usbMonitoringReady || !::coordinator.isInitialized) return
+        reconcileMountedUsbVolumes(removedRoot)
+        usbReconciliationJob?.cancel()
+        usbReconciliationJob = lifecycleScope.launch {
+            USB_RECONCILIATION_DELAYS_MS.forEach { delayMs ->
+                delay(delayMs)
+                reconcileMountedUsbVolumes()
+            }
+        }
+    }
+
+    private fun reconcileMountedUsbVolumes(removedRoot: Uri? = null) {
+        if (!usbMonitoringReady || !::coordinator.isInitialized) return
+        val removedIdentity = removedRoot?.let { rootUri ->
+            UsbStorageResolver.volumeIdentity(rootUri)
+        }
+        val mountedRoots = UsbStorageResolver.findMountedUsbRoots(this)
+            .filterNot { rootUri ->
+                removedIdentity != null &&
+                    UsbStorageResolver.volumeIdentity(rootUri) == removedIdentity
+            }
+        coordinator.onMountedUsbRootsChanged(
+            mountedRoots,
+        )
     }
 
     private fun openStoragePicker() {
@@ -650,10 +734,18 @@ class MainActivity : ComponentActivity() {
 
     private companion object {
         const val STARTUP_LOG_TAG = "TV2000.Startup"
+        const val USB_LOG_TAG = "TV2000.Usb"
         const val APP_LAUNCH_STARTED = "app_launch_started_elapsed_ms"
         const val APP_CONTENT_FIRST_FRAME = "app_content_first_frame_elapsed_ms"
         const val PLAYBACK_DEPENDENCIES_READY = "playback_dependencies_ready_elapsed_ms"
         const val PLAYER_FIRST_FRAME = "player_first_frame_elapsed_ms"
+        val USB_RECONCILIATION_DELAYS_MS = listOf(500L, 1_500L, 3_000L)
+        val USB_REMOVAL_ACTIONS = setOf(
+            Intent.ACTION_MEDIA_EJECT,
+            Intent.ACTION_MEDIA_UNMOUNTED,
+            Intent.ACTION_MEDIA_REMOVED,
+            Intent.ACTION_MEDIA_BAD_REMOVAL,
+        )
         val REMOTE_CONTROL_KEYS = setOf(
             KeyEvent.KEYCODE_DPAD_UP,
             KeyEvent.KEYCODE_DPAD_DOWN,

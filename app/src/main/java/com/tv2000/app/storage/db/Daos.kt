@@ -12,17 +12,20 @@ interface MediaCatalogDao {
     @Query("SELECT * FROM storage_volume WHERE volume_id = :volumeId")
     suspend fun storageVolume(volumeId: String): StorageVolumeEntity?
 
+    @Query("SELECT * FROM storage_volume")
+    suspend fun storageVolumes(): List<StorageVolumeEntity>
+
     @Query("UPDATE storage_volume SET is_online = 0")
     suspend fun markAllVolumesOffline()
+
+    @Query("UPDATE storage_volume SET is_online = 0 WHERE volume_id = :volumeId")
+    suspend fun markVolumeOffline(volumeId: String)
 
     @Query("SELECT * FROM channel WHERE volume_id = :volumeId")
     suspend fun channelsForVolume(volumeId: String): List<ChannelEntity>
 
     @Query("SELECT COALESCE(MAX(channel_number), 0) FROM channel")
     suspend fun maximumChannelNumber(): Int
-
-    @Query("UPDATE channel SET is_visible = 0")
-    suspend fun markAllChannelsInvisible()
 
     @Query("UPDATE channel SET is_visible = 0 WHERE volume_id = :volumeId")
     suspend fun invalidateChannelsForVolume(volumeId: String)

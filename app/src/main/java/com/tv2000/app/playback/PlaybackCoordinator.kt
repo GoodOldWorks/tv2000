@@ -24,6 +24,7 @@ import com.tv2000.app.smb.classifySmbFailure
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -65,9 +66,12 @@ class PlaybackCoordinator(
     private var configuredSmbResources: List<SmbResource> = emptyList()
     private var activeResourceKind: ResourceKind? = null
     private var activeResourceId: String? = null
+    private var activeRootUri: Uri? = null
+    private var latestMountedUsbRootUris: List<String> = emptyList()
     private var pendingConfirmationAction: PendingConfirmationAction? = null
     private var pendingConfirmationRequest: ConfirmationRequest? = null
     private val historyWriteMutex = Mutex()
+    private val usbSwapMutex = Mutex()
     private val backgroundResumeState = BackgroundPlaybackResumeState()
     private val doublePressDetector = DirectionalDoublePressDetector(
         timeoutMs = DIRECTIONAL_DOUBLE_PRESS_TIMEOUT_MS,
@@ -94,6 +98,7 @@ class PlaybackCoordinator(
         }
 
         val parsedRootUri = Uri.parse(rootUri)
+        activeRootUri = parsedRootUri
         activeResourceKind = if (SmbMediaUri.isSmb(parsedRootUri)) {
             ResourceKind.SMB
         } else {
@@ -115,26 +120,140 @@ class PlaybackCoordinator(
             historyStore.clearRootUri()
             activeResourceKind = null
             activeResourceId = null
+            activeRootUri = null
             mutableState.value = freshState(AppMode.NEEDS_STORAGE_ACCESS)
             return false
         }
 
+        return restoreIndexedOrScan(parsedRootUri, restoringApp = true)
+    }
+
+    private suspend fun restoreIndexedOrScan(
+        rootUri: Uri,
+        restoringApp: Boolean,
+    ): Boolean {
         val indexedChannels = runCatching {
-            catalogRepository.loadIndexedChannels(parsedRootUri)
+            catalogRepository.loadIndexedChannels(rootUri)
         }.getOrDefault(emptyList())
         if (indexedChannels.isNotEmpty() && canResumeFromIndex(indexedChannels)) {
-            showChannelsAndTune(indexedChannels, restoringApp = true)
-            scheduleBackgroundScan(parsedRootUri)
+            showChannelsAndTune(indexedChannels, restoringApp)
+            scheduleBackgroundScan(rootUri)
             return true
         }
 
-        return scanAndPlay(parsedRootUri, restoringApp = true)
+        return scanAndPlay(rootUri, restoringApp)
     }
 
     suspend fun onStorageGranted(rootUri: Uri) {
         configuredUsbRootUri = rootUri.toString()
         historyStore.saveUsbRootUri(rootUri.toString())
         activateResource(ResourceKind.USB, USB_RESOURCE_ID, rootUri)
+    }
+
+    fun onMountedUsbRootsChanged(mountedRoots: List<Uri>) {
+        latestMountedUsbRootUris = mountedRoots
+            .map(Uri::toString)
+            .distinctBy { rootUri -> UsbStorageResolver.volumeIdentity(rootUri) }
+        if (activeResourceKind == ResourceKind.SMB) return
+
+        val decision = decideUsbSwap(
+            selectedRootUri = configuredUsbRootUri,
+            mountedRootUris = latestMountedUsbRootUris,
+            selectedRootNeedsRestore = isWaitingForRemovedUsb(),
+        )
+        if (decision == UsbSwapDecision.KeepCurrent) return
+
+        val outgoingSnapshot = if (activeResourceKind == ResourceKind.USB) {
+            val snapshot = capturePlaybackSnapshot()
+            stopForUsbRemoval()
+            snapshot
+        } else {
+            null
+        }
+
+        scope.launch {
+            usbSwapMutex.withLock {
+                outgoingSnapshot?.let { snapshot ->
+                    withContext(NonCancellable) {
+                        persistPlaybackSnapshot(snapshot)
+                    }
+                }
+                reconcileLatestMountedUsbRoots()
+            }
+        }
+    }
+
+    private fun stopForUsbRemoval() {
+        backgroundScanJob?.cancel()
+        backgroundScanJob = null
+        tuneJob?.cancel()
+        tuneJob = null
+        overlayJob?.cancel()
+        overlayJob = null
+        cancelDirectionalGestures()
+        cancelBackExitPrompt()
+        player.pause()
+        player.stop()
+        player.clearMediaItems()
+        playingChannelIndex = null
+        mutableState.value = freshState(
+            mode = AppMode.STORAGE_UNAVAILABLE,
+            scanFailure = ScanFailure.USB_REMOVED,
+        )
+    }
+
+    private suspend fun reconcileLatestMountedUsbRoots() {
+        if (activeResourceKind == ResourceKind.SMB) return
+
+        when (
+            val decision = decideUsbSwap(
+                selectedRootUri = configuredUsbRootUri,
+                mountedRootUris = latestMountedUsbRootUris,
+                selectedRootNeedsRestore = isWaitingForRemovedUsb(),
+            )
+        ) {
+            UsbSwapDecision.KeepCurrent -> Unit
+            UsbSwapDecision.WaitForUsb,
+            UsbSwapDecision.MultipleVolumes,
+            -> configuredUsbRootUri
+                ?.takeIf { activeResourceKind == ResourceKind.USB }
+                ?.let(Uri::parse)
+                ?.let { rootUri -> catalogRepository.markVolumeOffline(rootUri) }
+
+            is UsbSwapDecision.RestoreCurrent -> {
+                activateMountedUsbRoot(decision.rootUri)
+            }
+
+            is UsbSwapDecision.SwitchToSingle -> {
+                configuredUsbRootUri
+                    ?.takeIf { selectedRootUri ->
+                        UsbStorageResolver.volumeIdentity(selectedRootUri) !=
+                            UsbStorageResolver.volumeIdentity(decision.rootUri)
+                    }
+                    ?.let(Uri::parse)
+                    ?.let { outgoingRoot ->
+                        catalogRepository.markVolumeOffline(outgoingRoot)
+                    }
+                activateMountedUsbRoot(decision.rootUri)
+            }
+        }
+    }
+
+    private fun isWaitingForRemovedUsb(): Boolean =
+        activeResourceKind == ResourceKind.USB &&
+            mutableState.value.mode == AppMode.STORAGE_UNAVAILABLE &&
+            mutableState.value.scanFailure == ScanFailure.USB_REMOVED
+
+    private suspend fun activateMountedUsbRoot(rootUri: String) {
+        configuredUsbRootUri = rootUri
+        historyStore.saveUsbRootUri(rootUri)
+        activateResource(
+            kind = ResourceKind.USB,
+            resourceId = USB_RESOURCE_ID,
+            rootUri = Uri.parse(rootUri),
+            restoringApp = true,
+            preferIndex = true,
+        )
     }
 
     fun usbVideoDirectory(): String = configuredUsbVideoDirectory
@@ -439,6 +558,16 @@ class PlaybackCoordinator(
     }
 
     override fun onPlayerError(error: PlaybackException) {
+        if (activeResourceKind == ResourceKind.USB) {
+            val mountedRoots = UsbStorageResolver.findMountedUsbRoots(context)
+            if (decideUsbSwap(configuredUsbRootUri, mountedRoots.map(Uri::toString)) !=
+                UsbSwapDecision.KeepCurrent
+            ) {
+                onMountedUsbRootsChanged(mountedRoots)
+                return
+            }
+        }
+
         val current = mutableState.value
         val channel = current.currentChannel ?: return
         if (player.currentMediaItem?.localConfiguration?.uri?.let(SmbMediaUri::isSmb) == true) {
@@ -500,10 +629,25 @@ class PlaybackCoordinator(
             }
 
             is ScanResult.Failure -> {
+                if (activeResourceKind == ResourceKind.USB &&
+                    result.reason == ScanFailure.UNAVAILABLE
+                ) {
+                    val mountedRoots = UsbStorageResolver.findMountedUsbRoots(context)
+                    if (decideUsbSwap(
+                            configuredUsbRootUri,
+                            mountedRoots.map(Uri::toString),
+                        ) != UsbSwapDecision.KeepCurrent
+                    ) {
+                        onMountedUsbRootsChanged(mountedRoots)
+                        return true
+                    }
+                }
+
                 if (result.reason == ScanFailure.PERMISSION_LOST) {
                     historyStore.clearRootUri()
                     activeResourceKind = null
                     activeResourceId = null
+                    activeRootUri = null
                     historyStore.setActiveSmbResource(null)
                     mutableState.value = freshState(AppMode.NEEDS_STORAGE_ACCESS)
                     false
@@ -524,7 +668,7 @@ class PlaybackCoordinator(
         channels: List<Channel>,
         restoringApp: Boolean,
     ) {
-        val activeChannelId = historyStore.activeChannelId()
+        val activeChannelId = historyStore.activeChannelId(activeRootUri?.toString())
         val initialIndex = channels.indexOfFirst {
             it.id == activeChannelId || it.legacyId == activeChannelId
         }
@@ -542,7 +686,7 @@ class PlaybackCoordinator(
     }
 
     private suspend fun canResumeFromIndex(channels: List<Channel>): Boolean {
-        val activeChannelId = historyStore.activeChannelId()
+        val activeChannelId = historyStore.activeChannelId(activeRootUri?.toString())
         val channel = channels.firstOrNull {
             it.id == activeChannelId || it.legacyId == activeChannelId
         } ?: channels.firstOrNull() ?: return false
@@ -1137,15 +1281,22 @@ class PlaybackCoordinator(
         kind: ResourceKind,
         resourceId: String,
         rootUri: Uri,
+        restoringApp: Boolean = false,
+        preferIndex: Boolean = false,
     ) {
         backgroundScanJob?.cancel()
         checkpoint()
         player.stop()
         activeResourceKind = kind
         activeResourceId = resourceId
+        activeRootUri = rootUri
         historyStore.setActiveSmbResource(resourceId.takeIf { kind == ResourceKind.SMB })
         historyStore.saveRootUri(rootUri.toString())
-        scanAndPlay(rootUri, restoringApp = false)
+        if (preferIndex) {
+            restoreIndexedOrScan(rootUri, restoringApp)
+        } else {
+            scanAndPlay(rootUri, restoringApp)
+        }
     }
 
     private suspend fun deleteSmbResource(resourceId: String) {
@@ -1274,6 +1425,8 @@ class PlaybackCoordinator(
         configuredSmbResources = emptyList()
         activeResourceKind = null
         activeResourceId = null
+        activeRootUri = null
+        latestMountedUsbRootUris = emptyList()
         pendingChannelIndex = 0
         pendingConfirmationAction = null
         pendingConfirmationRequest = null
@@ -1373,7 +1526,7 @@ class PlaybackCoordinator(
         player.playWhenReady = if (restoringApp) history?.wasPlaying ?: true else true
         playingChannelIndex = channelIndex
 
-        historyStore.saveActiveChannel(channel.id)
+        historyStore.saveActiveChannel(channel.id, activeRootUri?.toString())
         mutableState.value = mutableState.value.copy(
             mode = AppMode.READY,
             currentChannelIndex = channelIndex,
@@ -1594,14 +1747,18 @@ class PlaybackCoordinator(
     private fun persistCurrentSnapshot() {
         val snapshot = capturePlaybackSnapshot() ?: return
         scope.launch {
-            historyWriteMutex.withLock {
-                historyStore.saveChannelPlayback(
-                    channelId = snapshot.channelId,
-                    episodeId = snapshot.episodeId,
-                    positionMs = snapshot.positionMs,
-                    wasPlaying = snapshot.wasPlaying,
-                )
-            }
+            persistPlaybackSnapshot(snapshot)
+        }
+    }
+
+    private suspend fun persistPlaybackSnapshot(snapshot: PlaybackSnapshot) {
+        historyWriteMutex.withLock {
+            historyStore.saveChannelPlayback(
+                channelId = snapshot.channelId,
+                episodeId = snapshot.episodeId,
+                positionMs = snapshot.positionMs,
+                wasPlaying = snapshot.wasPlaying,
+            )
         }
     }
 

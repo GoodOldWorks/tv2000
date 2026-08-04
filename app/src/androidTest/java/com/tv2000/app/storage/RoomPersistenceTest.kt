@@ -7,6 +7,8 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.tv2000.app.model.ScannedChannel
 import com.tv2000.app.model.ScannedEpisode
+import com.tv2000.app.storage.db.ChannelEntity
+import com.tv2000.app.storage.db.StorageVolumeEntity
 import com.tv2000.app.storage.db.Tv2000Database
 import com.tv2000.app.smb.SmbResource
 import kotlinx.coroutines.runBlocking
@@ -63,10 +65,122 @@ class RoomPersistenceTest {
         assertEquals(3, second.first { it.name == "BBC" }.number)
         assertEquals(1, second.first { it.name == "动画" }.number)
         val allChannels = database.mediaCatalogDao().channelsForVolume(
-            StableMediaIds.volume(rootUri.toString()),
+            StableMediaIds.volume(UsbStorageResolver.volumeIdentity(rootUri.toString())),
         )
         assertFalse(allChannels.first { it.displayName == "西游记" }.isVisible)
         assertTrue(allChannels.first { it.displayName == "BBC" }.isVisible)
+    }
+
+    @Test
+    fun diskSwapKeepsEachUuidCatalogChannelNumbersAndHistory() = runBlocking {
+        val suffix = System.nanoTime().toString()
+        val diskA = Uri.parse(
+            "tv2000-mediastore://AAAA-$suffix?fallbackPath=%2Fstorage%2FAAAA-$suffix",
+        )
+        val diskAWithChangedMountPath = Uri.parse(
+            "tv2000-mediastore://AAAA-$suffix?fallbackPath=%2Fmnt%2Fmedia_rw%2FAAAA-$suffix",
+        )
+        val diskB = Uri.parse("tv2000-mediastore://BBBB-$suffix")
+        val reformattedDiskA = Uri.parse("tv2000-mediastore://CCCC-$suffix")
+        val historyStore = PlaybackHistoryStore(context, database) { TEST_TIME }
+
+        val diskAChannels = catalogRepository.replaceSnapshot(
+            diskA,
+            listOf(
+                scannedChannel("动画", "001.mp4"),
+                scannedChannel("西游记", "第01集.mp4"),
+            ),
+        )
+        historyStore.saveActiveChannel(diskAChannels.last().id, diskA.toString())
+        historyStore.saveChannelPlayback(
+            channelId = diskAChannels.last().id,
+            episodeId = diskAChannels.last().episodes.single().id,
+            positionMs = 23_410L,
+            wasPlaying = true,
+        )
+
+        val diskBChannel = catalogRepository.replaceSnapshot(
+            diskB,
+            listOf(scannedChannel("动画", "001.mp4")),
+        ).single()
+        historyStore.saveActiveChannel(diskBChannel.id, diskB.toString())
+
+        assertEquals(listOf(1, 2), diskAChannels.map { it.number })
+        assertEquals(3, diskBChannel.number)
+        assertEquals(
+            listOf(1, 2),
+            catalogRepository.loadIndexedChannels(diskAWithChangedMountPath).map { it.number },
+        )
+        assertEquals(
+            diskAChannels.last().id,
+            historyStore.activeChannelId(diskAWithChangedMountPath.toString()),
+        )
+        assertEquals(diskBChannel.id, historyStore.activeChannelId(diskB.toString()))
+
+        val reinsertedDiskA = catalogRepository.replaceSnapshot(
+            diskAWithChangedMountPath,
+            listOf(
+                scannedChannel("动画", "001.mp4"),
+                scannedChannel("西游记", "第01集.mp4"),
+            ),
+        )
+        assertEquals(listOf(1, 2), reinsertedDiskA.map { it.number })
+        assertEquals(
+            23_410L,
+            historyStore.channelPlayback(reinsertedDiskA.last().id)?.positionMs,
+        )
+
+        val reformattedChannel = catalogRepository.replaceSnapshot(
+            reformattedDiskA,
+            listOf(scannedChannel("动画", "001.mp4")),
+        ).single()
+        assertEquals(4, reformattedChannel.number)
+    }
+
+    @Test
+    fun existingFullUriVolumeIdIsReusedAfterMountPathChanges() = runBlocking {
+        val suffix = System.nanoTime().toString()
+        val oldRoot = Uri.parse(
+            "tv2000-mediastore://LEGACY-$suffix?fallbackPath=%2Fstorage%2FLEGACY-$suffix",
+        )
+        val remountedRoot = Uri.parse(
+            "tv2000-mediastore://LEGACY-$suffix?fallbackPath=%2Fmnt%2Fmedia_rw%2FLEGACY-$suffix",
+        )
+        val legacyVolumeId = StableMediaIds.volume(oldRoot.toString())
+        val legacyChannelId = StableMediaIds.channel(legacyVolumeId, "动画")
+        val dao = database.mediaCatalogDao()
+        dao.upsertStorageVolume(
+            StorageVolumeEntity(
+                volumeId = legacyVolumeId,
+                displayName = "旧版 U 盘",
+                rootUri = oldRoot.toString(),
+                permissionPersisted = true,
+                isOnline = true,
+                firstSeenAt = TEST_TIME,
+                lastSeenAt = TEST_TIME,
+            ),
+        )
+        dao.upsertChannel(
+            ChannelEntity(
+                channelId = legacyChannelId,
+                volumeId = legacyVolumeId,
+                relativePath = "动画",
+                sourceUri = "file:///storage/legacy/动画",
+                displayName = "动画",
+                channelNumber = 42,
+                isVisible = true,
+                lastScannedAt = TEST_TIME,
+                createdAt = TEST_TIME,
+            ),
+        )
+
+        val channels = catalogRepository.replaceSnapshot(
+            remountedRoot,
+            listOf(scannedChannel("动画", "001.mp4")),
+        )
+
+        assertEquals(legacyChannelId, channels.single().id)
+        assertEquals(42, channels.single().number)
     }
 
     @Test

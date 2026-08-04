@@ -8,6 +8,7 @@
     <string name="put_videos_in_directories">请将视频放入 TV2000 或所设置目录的一级目录中</string>
     <string name="device_removed">资源暂时不可用</string>
     <string name="reinsert_usb">请检查 U 盘或网络连接；可按菜单键切换资源</string>
+    <string name="insert_original_or_another_usb">请插入原 U 盘或另一张影片盘</string>
     <string name="smb_resource_unavailable">SMB 资源不可用，请检查网络或账号</string>
     <string name="smb_authentication_failed">SMB 登录失败</string>
     <string name="smb_authentication_help">服务器拒绝了登录信息，请检查用户名、密码和域</string>

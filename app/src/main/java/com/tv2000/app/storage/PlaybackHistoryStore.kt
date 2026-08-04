@@ -138,17 +138,28 @@ class PlaybackHistoryStore(
         return resources
     }
 
-    suspend fun activeChannelId(): String? =
-        database.playbackStateDao().activeChannelId()
+    suspend fun activeChannelId(rootUri: String? = null): String? {
+        if (rootUri != null) {
+            context.tv2000DataStore.data.first()[activeChannelKey(rootUri)]?.let { channelId ->
+                return channelId
+            }
+        }
+        return database.playbackStateDao().activeChannelId()
             ?: context.tv2000DataStore.data.first()[LEGACY_ACTIVE_CHANNEL]
+    }
 
-    suspend fun saveActiveChannel(channelId: String) {
+    suspend fun saveActiveChannel(channelId: String, rootUri: String? = null) {
         database.playbackStateDao().upsertAppState(
             AppStateEntity(
                 activeChannelId = channelId,
                 updatedAt = clock(),
             ),
         )
+        if (rootUri != null) {
+            context.tv2000DataStore.edit { preferences ->
+                preferences[activeChannelKey(rootUri)] = channelId
+            }
+        }
     }
 
     suspend fun channelPlayback(
@@ -312,6 +323,13 @@ class PlaybackHistoryStore(
     private fun historyKey(channelId: String) =
         stringPreferencesKey("$HISTORY_KEY_PREFIX${sha256(channelId)}")
 
+    private fun activeChannelKey(rootUri: String) =
+        stringPreferencesKey(
+            "$ACTIVE_CHANNEL_RESOURCE_KEY_PREFIX${
+                StableMediaIds.volume(UsbStorageResolver.volumeIdentity(rootUri))
+            }",
+        )
+
     private fun sha256(value: String): String =
         MessageDigest.getInstance("SHA-256")
             .digest(value.toByteArray(Charsets.UTF_8))
@@ -325,6 +343,7 @@ class PlaybackHistoryStore(
         val SMB_RESOURCES = stringPreferencesKey("smb_resources")
         val LEGACY_ACTIVE_CHANNEL = stringPreferencesKey("active_channel")
         const val HISTORY_KEY_PREFIX = "history_"
+        const val ACTIVE_CHANNEL_RESOURCE_KEY_PREFIX = "active_channel_resource_"
         const val DEFAULT_PLAYBACK_SPEED = 1.0f
         const val MIN_PLAYBACK_SPEED = 0.5f
         const val MAX_PLAYBACK_SPEED = 2.0f
