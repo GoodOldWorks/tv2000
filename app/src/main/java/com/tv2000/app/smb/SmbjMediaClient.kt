@@ -24,20 +24,23 @@ import java.util.EnumSet
 import java.util.concurrent.Callable
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutionException
-import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 class SmbjMediaClient : Closeable {
     private val currentServerIdentity = ThreadLocal<NtlmServerIdentity?>()
-    private val standardClientConfig = createClientConfig(ntlmIntegrity = true)
-    private val compatibilityClientConfig = createClientConfig(ntlmIntegrity = false)
+    private val standardClientConfig = lazy {
+        createClientConfig(ntlmIntegrity = true)
+    }
+    private val compatibilityClientConfig = lazy {
+        createClientConfig(ntlmIntegrity = false)
+    }
     private val compatibilityAuthenticationKeys = ConcurrentHashMap.newKeySet<String>()
     private val connectionLock = Any()
     private val sharedConnections = mutableMapOf<SharedConnectionKey, SharedConnection>()
-    private val channelScanExecutor: ExecutorService = Executors.newFixedThreadPool(
-        CHANNEL_SCAN_PARALLELISM,
-    )
+    private val channelScanExecutor = lazy {
+        Executors.newFixedThreadPool(CHANNEL_SCAN_PARALLELISM)
+    }
 
     private fun createClientConfig(ntlmIntegrity: Boolean): SmbConfig = SmbConfig.builder()
         .apply { withNtlmConfig().withIntegrity(ntlmIntegrity) }
@@ -63,7 +66,7 @@ class SmbjMediaClient : Closeable {
                 .filter(String::isNotEmpty)
                 .toList()
 
-            channelScanExecutor.invokeAll(
+            channelScanExecutor.value.invokeAll(
                 channelNames.map { channelName ->
                     Callable { scanChannel(share, resource, channelName) }
                 },
@@ -187,7 +190,8 @@ class SmbjMediaClient : Closeable {
             username = resource.username,
             password = resource.password,
             domain = resource.domain,
-            compatibilityMode = config === compatibilityClientConfig,
+            compatibilityMode = compatibilityClientConfig.isInitialized() &&
+                config === compatibilityClientConfig.value,
         )
         sharedConnections[key]
             ?.takeIf { connection -> connection.share.isConnected }
@@ -223,7 +227,9 @@ class SmbjMediaClient : Closeable {
     }
 
     override fun close() {
-        channelScanExecutor.shutdownNow()
+        if (channelScanExecutor.isInitialized()) {
+            channelScanExecutor.value.shutdownNow()
+        }
         val connections = synchronized(connectionLock) {
             sharedConnections.values.toList().also { sharedConnections.clear() }
         }
@@ -251,14 +257,14 @@ class SmbjMediaClient : Closeable {
     ): T {
         val key = resource.authenticationCompatibilityKey()
         if (key in compatibilityAuthenticationKeys) {
-            return block(compatibilityClientConfig)
+            return block(compatibilityClientConfig.value)
         }
 
         return try {
-            block(standardClientConfig)
+            block(standardClientConfig.value)
         } catch (error: Exception) {
             if (!shouldRetryWithoutNtlmIntegrity(error)) throw error
-            block(compatibilityClientConfig).also {
+            block(compatibilityClientConfig.value).also {
                 compatibilityAuthenticationKeys += key
             }
         }

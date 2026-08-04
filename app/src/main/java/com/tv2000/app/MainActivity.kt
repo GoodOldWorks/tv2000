@@ -6,15 +6,21 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
+import android.net.Uri
 import android.os.Bundle
+import android.os.SystemClock
 import android.text.InputType
+import android.util.Log
+import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewTreeObserver
 import android.view.WindowManager
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
@@ -45,7 +51,13 @@ import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private lateinit var coordinator: PlaybackCoordinator
+    private lateinit var rootView: FrameLayout
+    private lateinit var startupView: View
     private var playerView: PlayerView? = null
+    private val launchStartedElapsedMs = SystemClock.elapsedRealtime()
+    private var playerFirstFrameReported = false
+    private var pendingStorageRoot: Uri? = null
+    private var retryStorageSelectionWhenReady = false
     private var storagePickerOpen = false
     private var smbSetupDialog: AlertDialog? = null
     private var smbSetupJob: Job? = null
@@ -67,22 +79,59 @@ class MainActivity : ComponentActivity() {
             )
         }
 
-        lifecycleScope.launch {
-            coordinator.onStorageGranted(uri)
-        }
+        openStorageRoot(uri)
     }
 
     private val mediaPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
         storagePickerOpen = false
-        if (granted) openStoragePicker()
+        if (!granted) return@registerForActivityResult
+        if (::coordinator.isInitialized) {
+            openStoragePicker()
+        } else {
+            retryStorageSelectionWhenReady = true
+        }
     }
 
     @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         configureTelevisionWindow()
+        logStartupTimestamp(APP_LAUNCH_STARTED, launchStartedElapsedMs)
+
+        rootView = FrameLayout(this).apply {
+            setBackgroundColor(Color.BLACK)
+        }
+        startupView = TextView(this).apply {
+            gravity = Gravity.CENTER
+            setBackgroundColor(Color.BLACK)
+            setTextColor(Color.rgb(237, 231, 213))
+            text = getString(R.string.app_name)
+            textSize = 36f
+            setTypeface(Typeface.DEFAULT, Typeface.BOLD)
+        }
+        rootView.addView(startupView, matchParentLayoutParams())
+        setContentView(rootView)
+
+        onBackPressedDispatcher.addCallback(
+            this,
+            object : OnBackPressedCallback(true) {
+                override fun handleOnBackPressed() {
+                    if (::coordinator.isInitialized) {
+                        handleRemoteResult(coordinator.handleKey(KeyEvent.KEYCODE_BACK))
+                    } else {
+                        finish()
+                    }
+                }
+            },
+        )
+        initializePlaybackAfterFirstDraw()
+    }
+
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+    private fun initializePlayback() {
+        if (isFinishing || isDestroyed || ::coordinator.isInitialized) return
 
         val database = Tv2000Database.get(applicationContext)
         val historyStore = PlaybackHistoryStore(applicationContext, database)
@@ -111,14 +160,7 @@ class MainActivity : ComponentActivity() {
             historyStore = historyStore,
             smbClient = smbClient,
             scope = lifecycleScope,
-        )
-        onBackPressedDispatcher.addCallback(
-            this,
-            object : OnBackPressedCallback(true) {
-                override fun handleOnBackPressed() {
-                    handleRemoteResult(coordinator.handleKey(KeyEvent.KEYCODE_BACK))
-                }
-            },
+            onFirstFrameRendered = ::onPlayerFirstFrameRendered,
         )
 
         // Keep video outside Compose so UI compatibility rendering never changes its Surface.
@@ -147,21 +189,86 @@ class MainActivity : ComponentActivity() {
                 Tv2000App(state = state)
             }
         }
-        setContentView(
-            FrameLayout(this).apply {
-                setBackgroundColor(Color.BLACK)
-                addView(playbackView, matchParentLayoutParams())
-                addView(overlayView, matchParentLayoutParams())
-            },
-        )
+        rootView.addView(playbackView, 0, matchParentLayoutParams())
+        rootView.addView(overlayView, 1, matchParentLayoutParams())
+        removeStartupViewAfterFirstOverlayDraw(overlayView)
+        logStartupTimestamp(PLAYBACK_DEPENDENCIES_READY)
 
         lifecycleScope.launch {
+            pendingStorageRoot?.let { rootUri ->
+                pendingStorageRoot = null
+                coordinator.onStorageGranted(rootUri)
+                return@launch
+            }
+            if (retryStorageSelectionWhenReady) {
+                retryStorageSelectionWhenReady = false
+                openStoragePicker()
+                return@launch
+            }
             val hasStoredRoot = coordinator.restore()
             if (!hasStoredRoot) openStoragePicker()
         }
     }
 
+    private fun initializePlaybackAfterFirstDraw() {
+        var handled = false
+        rootView.viewTreeObserver.addOnDrawListener(
+            object : ViewTreeObserver.OnDrawListener {
+                override fun onDraw() {
+                    if (handled) return
+                    handled = true
+                    val firstFrameElapsedMs = SystemClock.elapsedRealtime()
+                    rootView.post {
+                        if (rootView.viewTreeObserver.isAlive) {
+                            rootView.viewTreeObserver.removeOnDrawListener(this)
+                        }
+                        logStartupTimestamp(APP_CONTENT_FIRST_FRAME, firstFrameElapsedMs)
+                        initializePlayback()
+                    }
+                }
+            },
+        )
+    }
+
+    private fun removeStartupViewAfterFirstOverlayDraw(overlayView: View) {
+        var handled = false
+        overlayView.viewTreeObserver.addOnDrawListener(
+            object : ViewTreeObserver.OnDrawListener {
+                override fun onDraw() {
+                    if (handled) return
+                    handled = true
+                    overlayView.post {
+                        if (overlayView.viewTreeObserver.isAlive) {
+                            overlayView.viewTreeObserver.removeOnDrawListener(this)
+                        }
+                        rootView.removeView(startupView)
+                    }
+                }
+            },
+        )
+    }
+
+    private fun onPlayerFirstFrameRendered() {
+        if (playerFirstFrameReported) return
+        playerFirstFrameReported = true
+        logStartupTimestamp(PLAYER_FIRST_FRAME)
+        reportFullyDrawn()
+    }
+
+    private fun logStartupTimestamp(
+        event: String,
+        elapsedMs: Long = SystemClock.elapsedRealtime(),
+    ) {
+        Log.i(
+            STARTUP_LOG_TAG,
+            "$event=$elapsedMs launch_duration_ms=${elapsedMs - launchStartedElapsedMs}",
+        )
+    }
+
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        if (!::coordinator.isInitialized) {
+            return super.onKeyDown(keyCode, event)
+        }
         if (keyCode !in REMOTE_CONTROL_KEYS) {
             return super.onKeyDown(keyCode, event)
         }
@@ -223,8 +330,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        if (::coordinator.isInitialized) coordinator.onForeground()
+    }
+
     override fun onStop() {
-        coordinator.onBackground()
+        if (::coordinator.isInitialized) coordinator.onBackground()
         super.onStop()
     }
 
@@ -237,7 +349,7 @@ class MainActivity : ComponentActivity() {
         confirmationDialog?.dismiss()
         playerView?.player = null
         playerView = null
-        coordinator.release()
+        if (::coordinator.isInitialized) coordinator.release()
         super.onDestroy()
     }
 
@@ -273,7 +385,11 @@ class MainActivity : ComponentActivity() {
         storagePicker.launch(null)
     }
 
-    private fun openStorageRoot(rootUri: android.net.Uri) {
+    private fun openStorageRoot(rootUri: Uri) {
+        if (!::coordinator.isInitialized) {
+            pendingStorageRoot = rootUri
+            return
+        }
         storagePickerOpen = true
         lifecycleScope.launch {
             try {
@@ -533,6 +649,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private companion object {
+        const val STARTUP_LOG_TAG = "TV2000.Startup"
+        const val APP_LAUNCH_STARTED = "app_launch_started_elapsed_ms"
+        const val APP_CONTENT_FIRST_FRAME = "app_content_first_frame_elapsed_ms"
+        const val PLAYBACK_DEPENDENCIES_READY = "playback_dependencies_ready_elapsed_ms"
+        const val PLAYER_FIRST_FRAME = "player_first_frame_elapsed_ms"
         val REMOTE_CONTROL_KEYS = setOf(
             KeyEvent.KEYCODE_DPAD_UP,
             KeyEvent.KEYCODE_DPAD_DOWN,

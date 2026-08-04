@@ -714,6 +714,8 @@ adb -s "$TV2000_DEVICE" shell dumpsys meminfo \
 
 ```text
 app_launch_started_elapsed_ms
+app_content_first_frame_elapsed_ms
+playback_dependencies_ready_elapsed_ms
 player_first_frame_elapsed_ms
 ```
 
@@ -722,6 +724,10 @@ player_first_frame_elapsed_ms
 ```text
 first_frame - app_launch_started
 ```
+
+`app_content_first_frame_elapsed_ms` 用于确认点击图标后 App 自身的静态启动画面何时可见；
+`playback_dependencies_ready_elapsed_ms` 用于区分首屏显示和播放器依赖初始化耗时。两者只用于
+拆分启动瓶颈，最终验收仍以视频 `player_first_frame_elapsed_ms` 为准。
 
 每台真机执行 30 次：
 

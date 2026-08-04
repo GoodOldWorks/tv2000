@@ -44,6 +44,7 @@ class PlaybackCoordinator(
     private val smbClient: SmbjMediaClient,
     private val scope: CoroutineScope,
     private val monotonicClock: () -> Long = SystemClock::elapsedRealtime,
+    private val onFirstFrameRendered: () -> Unit = {},
 ) : Player.Listener {
     private val mutableState = MutableStateFlow(Tv2000UiState())
     val state: StateFlow<Tv2000UiState> = mutableState.asStateFlow()
@@ -67,6 +68,7 @@ class PlaybackCoordinator(
     private var pendingConfirmationAction: PendingConfirmationAction? = null
     private var pendingConfirmationRequest: ConfirmationRequest? = null
     private val historyWriteMutex = Mutex()
+    private val backgroundResumeState = BackgroundPlaybackResumeState()
     private val doublePressDetector = DirectionalDoublePressDetector(
         timeoutMs = DIRECTIONAL_DOUBLE_PRESS_TIMEOUT_MS,
     )
@@ -375,7 +377,15 @@ class PlaybackCoordinator(
     fun onBackground() {
         cancelDirectionalGestures()
         persistCurrentSnapshot()
+        backgroundResumeState.onBackground(player.playWhenReady)
         player.pause()
+    }
+
+    fun onForeground() {
+        val shouldResume = backgroundResumeState.consumeResumeRequest()
+        if (shouldResume && mutableState.value.mode == AppMode.READY) {
+            player.play()
+        }
     }
 
     fun release() {
@@ -422,6 +432,10 @@ class PlaybackCoordinator(
                 channelOverlayVisible = true,
             )
         }
+    }
+
+    override fun onRenderedFirstFrame() {
+        onFirstFrameRendered()
     }
 
     override fun onPlayerError(error: PlaybackException) {

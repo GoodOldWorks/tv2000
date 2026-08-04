@@ -281,10 +281,18 @@ private fun ChannelList(state: Tv2000UiState) {
         )
     }
     LaunchedEffect(state.channelListSelection, state.channels.size) {
-        val selectionVisible = listState.layoutInfo.visibleItemsInfo.any { item ->
+        val selectedItem = listState.layoutInfo.visibleItemsInfo.firstOrNull { item ->
             item.index == state.channelListSelection
         }
-        if (state.channelListSelection in state.channels.indices && !selectionVisible) {
+        val selectionFullyVisible = selectedItem?.let { item ->
+            isLazyListItemFullyVisible(
+                itemOffset = item.offset,
+                itemSize = item.size,
+                viewportStartOffset = listState.layoutInfo.viewportStartOffset,
+                viewportEndOffset = listState.layoutInfo.viewportEndOffset,
+            )
+        } == true
+        if (state.channelListSelection in state.channels.indices && !selectionFullyVisible) {
             listState.scrollToItem(state.channelListSelection)
         }
     }
@@ -518,10 +526,18 @@ private fun MenuPanel(
         )
     }
     LaunchedEffect(selectedIndex, items.size) {
-        val selectionVisible = listState.layoutInfo.visibleItemsInfo.any { item ->
+        val selectedItem = listState.layoutInfo.visibleItemsInfo.firstOrNull { item ->
             item.index == selectedIndex
         }
-        if (selectedIndex in items.indices && !selectionVisible) {
+        val selectionFullyVisible = selectedItem?.let { item ->
+            isLazyListItemFullyVisible(
+                itemOffset = item.offset,
+                itemSize = item.size,
+                viewportStartOffset = listState.layoutInfo.viewportStartOffset,
+                viewportEndOffset = listState.layoutInfo.viewportEndOffset,
+            )
+        } == true
+        if (selectedIndex in items.indices && !selectionFullyVisible) {
             listState.scrollToItem(selectedIndex)
         }
     }
@@ -606,6 +622,14 @@ private data class MenuListRow(
     val selected: Boolean,
     val disabled: Boolean,
 )
+
+internal fun isLazyListItemFullyVisible(
+    itemOffset: Int,
+    itemSize: Int,
+    viewportStartOffset: Int,
+    viewportEndOffset: Int,
+): Boolean = itemOffset >= viewportStartOffset &&
+    itemOffset + itemSize <= viewportEndOffset
 
 @Composable
 private fun rememberPanelRepaintToken(selection: Int): Int {
