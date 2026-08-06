@@ -18,6 +18,25 @@ class MediaCatalogRepository(
     suspend fun replaceSnapshot(
         rootUri: Uri,
         scannedChannels: List<ScannedChannel>,
+    ): List<Channel> = storeSnapshot(
+        rootUri = rootUri,
+        scannedChannels = scannedChannels,
+        retainMissing = false,
+    )
+
+    suspend fun mergeSnapshot(
+        rootUri: Uri,
+        scannedChannels: List<ScannedChannel>,
+    ): List<Channel> = storeSnapshot(
+        rootUri = rootUri,
+        scannedChannels = scannedChannels,
+        retainMissing = true,
+    )
+
+    private suspend fun storeSnapshot(
+        rootUri: Uri,
+        scannedChannels: List<ScannedChannel>,
+        retainMissing: Boolean,
     ): List<Channel> {
         val rootUriString = rootUri.toString()
         val dao = database.mediaCatalogDao()
@@ -43,7 +62,9 @@ class MediaCatalogRepository(
             )
 
             dao.markAllVolumesOffline()
-            dao.invalidateChannelsForVolume(volumeId)
+            if (!retainMissing) {
+                dao.invalidateChannelsForVolume(volumeId)
+            }
             dao.upsertStorageVolume(
                 StorageVolumeEntity(
                     volumeId = volumeId,
@@ -70,7 +91,9 @@ class MediaCatalogRepository(
                         createdAt = existingCreatedAt[channelId] ?: now,
                     ),
                 )
-                dao.markEpisodesUnavailable(channelId)
+                if (!retainMissing) {
+                    dao.markEpisodesUnavailable(channelId)
+                }
                 dao.upsertEpisodes(
                     scanned.episodes.mapIndexed { index, episode ->
                         EpisodeEntity(

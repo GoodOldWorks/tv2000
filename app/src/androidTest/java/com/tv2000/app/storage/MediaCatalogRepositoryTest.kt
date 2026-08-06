@@ -75,4 +75,67 @@ class MediaCatalogRepositoryTest {
             repository.loadIndexedChannels(Uri.parse("file:///usb-b")).isEmpty(),
         )
     }
+
+    @Test
+    fun partialMediaStoreSnapshotsOnlyGrowUntilAnAuthoritativeReplace() = runBlocking {
+        val rootUri = Uri.parse("tv2000-mediastore://TEST-0001")
+
+        val firstPartial = repository.mergeSnapshot(
+            rootUri = rootUri,
+            scannedChannels = listOf(scannedChannel(1, episodeCount = 31)),
+        )
+        assertEquals(1, firstPartial.size)
+        assertEquals(31, firstPartial.single().episodes.size)
+
+        val secondPartial = repository.mergeSnapshot(
+            rootUri = rootUri,
+            scannedChannels = (1..6).map { channelNumber ->
+                scannedChannel(channelNumber, episodeCount = 84)
+            },
+        )
+        assertEquals(6, secondPartial.size)
+        assertEquals(84, secondPartial.first().episodes.size)
+
+        val complete = repository.mergeSnapshot(
+            rootUri = rootUri,
+            scannedChannels = (1..16).map { channelNumber ->
+                scannedChannel(channelNumber, episodeCount = 84)
+            },
+        )
+        assertEquals(16, complete.size)
+        assertEquals((1..16).toList(), complete.map { it.number })
+
+        val laterPartial = repository.mergeSnapshot(
+            rootUri = rootUri,
+            scannedChannels = listOf(scannedChannel(1, episodeCount = 31)),
+        )
+        assertEquals(16, laterPartial.size)
+        assertEquals(84, laterPartial.first().episodes.size)
+
+        val authoritative = repository.replaceSnapshot(
+            rootUri = rootUri,
+            scannedChannels = listOf(scannedChannel(1, episodeCount = 31)),
+        )
+        assertEquals(1, authoritative.size)
+        assertEquals(31, authoritative.single().episodes.size)
+    }
+
+    private fun scannedChannel(number: Int, episodeCount: Int): ScannedChannel {
+        val channelPath = "频道$number"
+        return ScannedChannel(
+            relativePath = channelPath,
+            name = channelPath,
+            sourceUri = Uri.parse("tv2000-mediastore://TEST-0001/$channelPath"),
+            episodes = (1..episodeCount).map { episodeNumber ->
+                val episodeName = episodeNumber.toString().padStart(3, '0') + ".mp4"
+                ScannedEpisode(
+                    relativePath = episodeName,
+                    title = episodeName.substringBeforeLast('.'),
+                    uri = Uri.parse("content://media/test/$number/$episodeNumber"),
+                    sizeBytes = 1_024L,
+                    modifiedAt = 100L,
+                )
+            },
+        )
+    }
 }

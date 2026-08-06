@@ -10,7 +10,6 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
 import android.text.InputType
@@ -28,6 +27,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.platform.ComposeView
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.media3.exoplayer.DefaultRenderersFactory
@@ -79,6 +79,11 @@ class MainActivity : ComponentActivity() {
                 intent.action in USB_REMOVAL_ACTIONS
             }
             Log.i(USB_LOG_TAG, "media_action=${intent.action} root=$removedRoot")
+            if (intent.action == Intent.ACTION_MEDIA_SCANNER_FINISHED &&
+                ::coordinator.isInitialized
+            ) {
+                coordinator.onUsbMediaScanFinished()
+            }
             scheduleUsbVolumeReconciliation(removedRoot)
         }
     }
@@ -384,18 +389,19 @@ class MainActivity : ComponentActivity() {
         val filter = IntentFilter().apply {
             addAction(Intent.ACTION_MEDIA_CHECKING)
             addAction(Intent.ACTION_MEDIA_MOUNTED)
+            addAction(Intent.ACTION_MEDIA_SCANNER_FINISHED)
             addAction(Intent.ACTION_MEDIA_EJECT)
             addAction(Intent.ACTION_MEDIA_UNMOUNTED)
             addAction(Intent.ACTION_MEDIA_REMOVED)
             addAction(Intent.ACTION_MEDIA_BAD_REMOVAL)
             addDataScheme("file")
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(mediaMountReceiver, filter, RECEIVER_NOT_EXPORTED)
-        } else {
-            @Suppress("DEPRECATION")
-            registerReceiver(mediaMountReceiver, filter)
-        }
+        ContextCompat.registerReceiver(
+            this,
+            mediaMountReceiver,
+            filter,
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
         mediaReceiverRegistered = true
     }
 

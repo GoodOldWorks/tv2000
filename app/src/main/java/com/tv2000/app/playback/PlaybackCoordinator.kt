@@ -11,6 +11,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import com.tv2000.app.DebugStorageFallback
 import com.tv2000.app.R
 import com.tv2000.app.model.Channel
+import com.tv2000.app.model.ScannedChannel
 import com.tv2000.app.scanner.ChannelScanner
 import com.tv2000.app.scanner.ScanFailure
 import com.tv2000.app.scanner.ScanResult
@@ -181,6 +182,19 @@ class PlaybackCoordinator(
                 reconcileLatestMountedUsbRoots()
             }
         }
+    }
+
+    fun onUsbMediaScanFinished() {
+        val rootUri = activeRootUri ?: return
+        if (activeResourceKind != ResourceKind.USB ||
+            !UsbStorageResolver.isMediaStoreRoot(rootUri)
+        ) {
+            return
+        }
+        scheduleBackgroundScan(
+            rootUri = rootUri,
+            authoritativeMediaStoreSnapshot = true,
+        )
     }
 
     private fun stopForUsbRemoval() {
@@ -596,7 +610,11 @@ class PlaybackCoordinator(
         }
     }
 
-    private suspend fun scanAndPlay(rootUri: Uri, restoringApp: Boolean): Boolean {
+    private suspend fun scanAndPlay(
+        rootUri: Uri,
+        restoringApp: Boolean,
+        authoritativeMediaStoreSnapshot: Boolean = false,
+    ): Boolean {
         mutableState.value = freshState(AppMode.SCANNING)
 
         return when (
@@ -608,7 +626,13 @@ class PlaybackCoordinator(
         ) {
             is ScanResult.Success -> {
                 val channels = runCatching {
-                    catalogRepository.replaceSnapshot(rootUri, result.channels)
+                    if (UsbStorageResolver.isMediaStoreRoot(rootUri) &&
+                        !authoritativeMediaStoreSnapshot
+                    ) {
+                        catalogRepository.mergeSnapshot(rootUri, result.channels)
+                    } else {
+                        catalogRepository.replaceSnapshot(rootUri, result.channels)
+                    }
                 }.getOrElse {
                     mutableState.value = freshState(
                         mode = AppMode.STORAGE_UNAVAILABLE,
@@ -619,12 +643,20 @@ class PlaybackCoordinator(
 
                 if (channels.isEmpty()) {
                     mutableState.value = freshState(AppMode.NO_CONTENT)
-                    scheduleUsbMountSettlingScans(rootUri)
+                    scheduleUsbMountSettlingScans(
+                        rootUri = rootUri,
+                        initialSourceRevision = result.sourceRevision,
+                        initialChannels = result.channels,
+                    )
                     return true
                 }
 
                 showChannelsAndTune(channels, restoringApp)
-                scheduleUsbMountSettlingScans(rootUri)
+                scheduleUsbMountSettlingScans(
+                    rootUri = rootUri,
+                    initialSourceRevision = result.sourceRevision,
+                    initialChannels = result.channels,
+                )
                 true
             }
 
@@ -729,11 +761,17 @@ class PlaybackCoordinator(
         }.getOrDefault(false)
     }
 
-    private fun scheduleUsbMountSettlingScans(rootUri: Uri) {
+    private fun scheduleUsbMountSettlingScans(
+        rootUri: Uri,
+        initialSourceRevision: String? = null,
+        initialChannels: List<ScannedChannel>? = null,
+    ) {
         if (!SmbMediaUri.isSmb(rootUri)) {
             scheduleBackgroundScan(
                 rootUri = rootUri,
                 firstDelayMs = USB_INITIAL_RESCAN_DELAY_MS,
+                initialSourceRevision = initialSourceRevision,
+                initialChannels = initialChannels,
             )
         }
     }
@@ -741,18 +779,38 @@ class PlaybackCoordinator(
     private fun scheduleBackgroundScan(
         rootUri: Uri,
         firstDelayMs: Long = 0L,
+        initialSourceRevision: String? = null,
+        initialChannels: List<ScannedChannel>? = null,
+        authoritativeMediaStoreSnapshot: Boolean = false,
     ) {
         backgroundScanJob?.cancel()
         backgroundScanJob = scope.launch {
             val isSmb = SmbMediaUri.isSmb(rootUri)
-            val attempts = if (isSmb) 1 else USB_BACKGROUND_SCAN_ATTEMPTS
-            repeat(attempts) { attempt ->
-                val waitMs = if (attempt == 0) {
-                    firstDelayMs
+            val isMediaStore = UsbStorageResolver.isMediaStoreRoot(rootUri)
+            var attempt = 0
+            var knownSourceRevision = initialSourceRevision
+            var previousChannels = initialChannels
+            var replaceMissing = authoritativeMediaStoreSnapshot
+            while (isActive) {
+                val waitMs = if (isSmb) {
+                    firstDelayMs.takeIf { attempt == 0 } ?: break
                 } else {
-                    USB_BACKGROUND_SCAN_RETRY_DELAY_MS
+                    nextUsbIndexRefreshDelayMs(
+                        attempt = attempt,
+                        firstDelayMs = firstDelayMs,
+                        watchMediaStoreContinuously = isMediaStore,
+                    ) ?: break
                 }
                 if (waitMs > 0L) delay(waitMs)
+
+                if (isMediaStore &&
+                    !replaceMissing &&
+                    knownSourceRevision != null &&
+                    scanner.mediaStoreRevision(context, rootUri) == knownSourceRevision
+                ) {
+                    attempt += 1
+                    continue
+                }
 
                 val scanResult = scanner.scan(
                     context = context,
@@ -767,10 +825,14 @@ class PlaybackCoordinator(
                             showBackgroundScanFailure(rootUri, scanResult)
                             return@launch
                         }
-                        return@repeat
+                        attempt += 1
+                        continue
                     }
 
-                    is ScanResult.Success -> scanResult.channels
+                    is ScanResult.Success -> {
+                        knownSourceRevision = scanResult.sourceRevision
+                        scanResult.channels
+                    }
                 }
 
                 if (scannedChannels.isEmpty()) {
@@ -781,15 +843,39 @@ class PlaybackCoordinator(
                         showBackgroundNoContent(rootUri)
                         return@launch
                     }
-                    return@repeat
+                    if (replaceMissing) {
+                        runCatching {
+                            catalogRepository.replaceSnapshot(rootUri, emptyList())
+                        }
+                        showBackgroundNoContent(rootUri)
+                        replaceMissing = false
+                    }
+                    previousChannels = scannedChannels
+                    attempt += 1
+                    continue
                 }
 
+                if (!replaceMissing && scannedChannels == previousChannels) {
+                    attempt += 1
+                    continue
+                }
+                previousChannels = scannedChannels
+
                 val refreshedChannels = runCatching {
-                    catalogRepository.replaceSnapshot(rootUri, scannedChannels)
-                }.getOrNull() ?: return@repeat
-                if (refreshedChannels.isEmpty()) return@repeat
+                    if (isMediaStore && !replaceMissing) {
+                        catalogRepository.mergeSnapshot(rootUri, scannedChannels)
+                    } else {
+                        catalogRepository.replaceSnapshot(rootUri, scannedChannels)
+                    }
+                }.getOrNull()
+                if (refreshedChannels.isNullOrEmpty()) {
+                    attempt += 1
+                    continue
+                }
 
                 applyBackgroundRefresh(rootUri, refreshedChannels)
+                replaceMissing = false
+                attempt += 1
             }
         }
     }
@@ -1374,7 +1460,11 @@ class PlaybackCoordinator(
         backgroundScanJob = null
         checkpoint()
         catalogRepository.invalidateIndex(rootUri)
-        scanAndPlay(rootUri, restoringApp = true)
+        scanAndPlay(
+            rootUri = rootUri,
+            restoringApp = true,
+            authoritativeMediaStoreSnapshot = true,
+        )
         if (mutableState.value.mode == AppMode.READY) {
             showActionFeedback(R.string.index_rebuilt)
         }
@@ -1793,8 +1883,6 @@ class PlaybackCoordinator(
         const val PREVIOUS_EPISODE_POSITION_THRESHOLD_MS = 5_000L
         const val BACK_EXIT_PROMPT_DURATION_MS = 3_000L
         const val USB_INITIAL_RESCAN_DELAY_MS = 2_000L
-        const val USB_BACKGROUND_SCAN_RETRY_DELAY_MS = 3_000L
-        const val USB_BACKGROUND_SCAN_ATTEMPTS = 3
         const val USB_RESOURCE_ID = "usb"
     }
 }

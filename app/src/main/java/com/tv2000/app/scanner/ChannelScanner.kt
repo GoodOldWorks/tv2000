@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.ContentUris
 import android.net.Uri
 import android.os.Build
+import android.os.SystemClock
 import android.provider.MediaStore
 import android.util.Log
 import androidx.documentfile.provider.DocumentFile
@@ -17,6 +18,9 @@ import com.tv2000.app.smb.classifySmbFailure
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.attribute.BasicFileAttributes
 
 class ChannelScanner(
     private val smbClient: SmbjMediaClient? = null,
@@ -51,19 +55,30 @@ class ChannelScanner(
         scanDocumentUri(context, rootUri, usbVideoDirectory)
     }
 
+    suspend fun mediaStoreRevision(context: Context, rootUri: Uri): String? =
+        withContext(Dispatchers.IO) {
+            if (!UsbStorageResolver.isMediaStoreRoot(rootUri)) return@withContext null
+            val volumeName = UsbStorageResolver.mediaStoreVolumeName(rootUri)
+                ?: return@withContext null
+            readMediaStoreRevision(context, volumeName)
+        }
+
     private fun scanDocumentUri(
         context: Context,
         rootUri: Uri,
         usbVideoDirectory: String,
     ): ScanResult =
         try {
-            val root = if (rootUri.scheme == "file") {
-                rootUri.path?.let { path -> DocumentFile.fromFile(File(path)) }
-            } else {
-                DocumentFile.fromTreeUri(context, rootUri)
+            if (rootUri.scheme == "file") {
+                val storageRoot = rootUri.path?.let(::File)
+                    ?: return ScanResult.Failure(ScanFailure.UNAVAILABLE)
+                val videoRoot = resolveFileVideoRoot(storageRoot, usbVideoDirectory)
+                    ?: return ScanResult.Failure(ScanFailure.UNAVAILABLE)
+                return scanFileRoot(videoRoot)
             }
-                ?: return ScanResult.Failure(ScanFailure.UNAVAILABLE)
 
+            val root = DocumentFile.fromTreeUri(context, rootUri)
+                ?: return ScanResult.Failure(ScanFailure.UNAVAILABLE)
             scanDocumentRoot(resolveDocumentVideoRoot(root, usbVideoDirectory))
         } catch (_: SecurityException) {
             ScanResult.Failure(ScanFailure.PERMISSION_LOST)
@@ -95,19 +110,21 @@ class ChannelScanner(
 
         val episodes = directory.listFiles()
             .asSequence()
-            .filter { it.isFile }
-            .filterNot { it.name.orEmpty().startsWith(".") }
-            .filter { file ->
+            .mapNotNull { file ->
                 val fileName = file.name.orEmpty()
-                isSupportedVideoFile(fileName) && file.length() > 0L
-            }
-            .map { file ->
-                val fileName = file.name.orEmpty()
+                if (!file.isFile ||
+                    fileName.startsWith('.') ||
+                    !isSupportedVideoFile(fileName)
+                ) {
+                    return@mapNotNull null
+                }
+                val sizeBytes = file.length()
+                if (sizeBytes <= 0L) return@mapNotNull null
                 ScannedEpisode(
                     relativePath = fileName,
                     title = fileName.substringBeforeLast('.', missingDelimiterValue = fileName),
                     uri = file.uri,
-                    sizeBytes = file.length(),
+                    sizeBytes = sizeBytes,
                     modifiedAt = file.lastModified(),
                 )
             }
@@ -125,6 +142,70 @@ class ChannelScanner(
             episodes = episodes,
         )
     }
+
+    private fun scanFileRoot(root: File): ScanResult {
+        val rootAttributes = readAttributes(root)
+            ?: return ScanResult.Failure(ScanFailure.UNAVAILABLE)
+        if (!rootAttributes.isDirectory) {
+            return ScanResult.Failure(ScanFailure.UNAVAILABLE)
+        }
+        val children = root.listFiles()
+            ?: return ScanResult.Failure(ScanFailure.UNAVAILABLE)
+        val channels = children
+            .asSequence()
+            .filterNot { child -> child.name.startsWith('.') }
+            .filter { child -> readAttributes(child)?.isDirectory == true }
+            .mapNotNull(::scanFileChannel)
+            .sortedWith { left, right ->
+                NaturalOrderComparator.compare(left.name, right.name)
+            }
+            .toList()
+        return ScanResult.Success(channels)
+    }
+
+    private fun scanFileChannel(directory: File): ScannedChannel? {
+        val relativePath = directory.name.trim()
+        if (relativePath.isEmpty()) return null
+        val children = directory.listFiles() ?: return null
+        val episodes = children
+            .asSequence()
+            .filterNot { child -> child.name.startsWith('.') }
+            .filter { child -> isSupportedVideoFile(child.name) }
+            .mapNotNull { file ->
+                val attributes = readAttributes(file)
+                    ?.takeIf { it.isRegularFile && it.size() > 0L }
+                    ?: return@mapNotNull null
+                ScannedEpisode(
+                    relativePath = file.name,
+                    title = file.name.substringBeforeLast(
+                        '.',
+                        missingDelimiterValue = file.name,
+                    ),
+                    uri = Uri.fromFile(file),
+                    sizeBytes = attributes.size(),
+                    modifiedAt = attributes.lastModifiedTime().toMillis(),
+                )
+            }
+            .sortedWith { left, right ->
+                NaturalOrderComparator.compare(left.title, right.title)
+            }
+            .toList()
+        if (episodes.isEmpty()) return null
+        return ScannedChannel(
+            relativePath = relativePath,
+            name = displayChannelName(relativePath),
+            sourceUri = Uri.fromFile(directory),
+            episodes = episodes,
+        )
+    }
+
+    private fun readAttributes(file: File): BasicFileAttributes? = runCatching {
+        Files.readAttributes(
+            file.toPath(),
+            BasicFileAttributes::class.java,
+            LinkOption.NOFOLLOW_LINKS,
+        )
+    }.getOrNull()
 
     private fun scanMediaStore(
         context: Context,
@@ -147,6 +228,8 @@ class ChannelScanner(
         )
 
         return try {
+            val startedAt = SystemClock.elapsedRealtime()
+            val revisionBefore = readMediaStoreRevision(context, volumeName)
             val records = buildList {
                 context.contentResolver.query(
                     collectionUri,
@@ -181,12 +264,10 @@ class ChannelScanner(
                 }
             }
 
-            val fileRoot = UsbStorageResolver.fallbackFilePath(rootUri)?.let(::File)
-            val fileVideoRoot = fileRoot?.let { root ->
-                resolveFileVideoRoot(root, usbVideoDirectory)
-            }
-            val effectiveDirectory = fileVideoRoot?.relativeDirectory
-                ?: inferMediaStoreVideoDirectory(records, usbVideoDirectory)
+            val effectiveDirectory = inferMediaStoreVideoDirectory(
+                records,
+                usbVideoDirectory,
+            )
             val mediaStoreChannels = indexMediaStoreVideos(
                 records = records,
                 rootDirectory = effectiveDirectory,
@@ -214,19 +295,19 @@ class ChannelScanner(
                     },
                 )
             }
-            val fileChannels = fileVideoRoot
-                ?.directory
-                ?.let(DocumentFile::fromFile)
-                ?.let(::scanDocumentRoot)
-                ?.let { result -> (result as? ScanResult.Success)?.channels }
-                .orEmpty()
-
-            ScanResult.Success(
-                mergeScannedChannels(
-                    primary = mediaStoreChannels,
-                    secondary = fileChannels,
-                ),
+            val revisionAfter = readMediaStoreRevision(context, volumeName)
+            val stableRevision = revisionAfter.takeIf { revision ->
+                revisionBefore != null && revision == revisionBefore
+            }
+            Log.i(
+                SCAN_TAG,
+                "media_store volume=${UsbStorageResolver.volumeIdentity(rootUri)} " +
+                    "records=${records.size} channels=${mediaStoreChannels.size} " +
+                    "episodes=${mediaStoreChannels.sumOf { it.episodes.size }} " +
+                    "duration_ms=${SystemClock.elapsedRealtime() - startedAt} " +
+                    "stable_revision=${stableRevision != null}",
             )
+            ScanResult.Success(mediaStoreChannels, stableRevision)
         } catch (_: SecurityException) {
             ScanResult.Failure(ScanFailure.PERMISSION_LOST)
         } catch (_: Exception) {
@@ -254,25 +335,20 @@ class ChannelScanner(
     private fun resolveFileVideoRoot(
         storageRoot: File,
         preferredDirectory: String,
-    ): ResolvedFileVideoRoot? {
+    ): File? {
         val normalized = UsbStorageResolver.normalizeVideoDirectory(preferredDirectory)
             ?: UsbStorageResolver.DEFAULT_VIDEO_DIRECTORY
-        if (normalized.isEmpty()) return ResolvedFileVideoRoot(storageRoot, "")
+        if (normalized.isEmpty()) return storageRoot
 
         var current = storageRoot
-        val resolvedSegments = mutableListOf<String>()
         normalized.split('/').forEach { segment ->
             val children = current.listFiles() ?: return null
             val child = children.firstOrNull { candidate ->
                 candidate.isDirectory && candidate.name.equals(segment, ignoreCase = true)
-            } ?: return ResolvedFileVideoRoot(storageRoot, "")
+            } ?: return storageRoot
             current = child
-            resolvedSegments += child.name
         }
-        return ResolvedFileVideoRoot(
-            directory = current,
-            relativeDirectory = resolvedSegments.joinToString("/"),
-        )
+        return current
     }
 
     private fun inferMediaStoreVideoDirectory(
@@ -296,52 +372,26 @@ class ChannelScanner(
         }
         return normalized.takeIf { directoryFound }.orEmpty()
     }
+
+    private fun readMediaStoreRevision(context: Context, volumeName: String): String? =
+        runCatching {
+            when {
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.R ->
+                    "generation:${MediaStore.getGeneration(context, volumeName)}"
+
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q ->
+                    "version:${MediaStore.getVersion(context, volumeName)}"
+
+                else -> null
+            }
+        }.getOrNull()
 }
-
-private data class ResolvedFileVideoRoot(
-    val directory: File,
-    val relativeDirectory: String,
-)
-
-internal fun mergeScannedChannels(
-    primary: List<ScannedChannel>,
-    secondary: List<ScannedChannel>,
-): List<ScannedChannel> {
-    val channelsByPath = linkedMapOf<String, ScannedChannel>()
-    (primary + secondary).forEach { channel ->
-        val key = channel.relativePath.storageKey()
-        val existing = channelsByPath[key]
-        channelsByPath[key] = if (existing == null) {
-            channel
-        } else {
-            existing.copy(
-                episodes = mergeScannedEpisodes(existing.episodes, channel.episodes),
-            )
-        }
-    }
-    return channelsByPath.values.sortedWith { left, right ->
-        NaturalOrderComparator.compare(left.name, right.name)
-    }
-}
-
-private fun mergeScannedEpisodes(
-    primary: List<ScannedEpisode>,
-    secondary: List<ScannedEpisode>,
-): List<ScannedEpisode> {
-    val episodesByPath = linkedMapOf<String, ScannedEpisode>()
-    (primary + secondary).forEach { episode ->
-        episodesByPath.putIfAbsent(episode.relativePath.storageKey(), episode)
-    }
-    return episodesByPath.values.sortedWith { left, right ->
-        NaturalOrderComparator.compare(left.title, right.title)
-    }
-}
-
-private fun String.storageKey(): String =
-    replace('\\', '/').trim('/').lowercase()
 
 sealed interface ScanResult {
-    data class Success(val channels: List<ScannedChannel>) : ScanResult
+    data class Success(
+        val channels: List<ScannedChannel>,
+        val sourceRevision: String? = null,
+    ) : ScanResult
     data class Failure(
         val reason: ScanFailure,
         val diagnostic: String? = null,
@@ -360,3 +410,4 @@ enum class ScanFailure {
 }
 
 private const val TAG = "TV2000-SMB"
+private const val SCAN_TAG = "TV2000.Scan"
