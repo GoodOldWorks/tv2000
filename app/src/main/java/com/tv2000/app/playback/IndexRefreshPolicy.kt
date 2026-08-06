@@ -17,6 +17,23 @@ internal fun nextUsbIndexRefreshDelayMs(
     }
 }
 
+internal fun includeDirectFileSnapshotForBackgroundScan(
+    isMediaStore: Boolean,
+    remainingAttempts: Int,
+): Boolean {
+    require(remainingAttempts >= 0)
+    return isMediaStore && remainingAttempts > 0
+}
+
+internal fun shouldValidateCachedMediaStoreSnapshot(
+    isMediaStore: Boolean,
+    currentSourceRevision: String?,
+    validatedSourceRevision: String?,
+): Boolean {
+    if (!isMediaStore) return false
+    return currentSourceRevision == null || currentSourceRevision != validatedSourceRevision
+}
+
 private val DIRECT_STORAGE_RETRY_DELAYS_MS = listOf(3_000L, 3_000L)
 private val MEDIA_STORE_RETRY_DELAYS_MS = listOf(
     3_000L,

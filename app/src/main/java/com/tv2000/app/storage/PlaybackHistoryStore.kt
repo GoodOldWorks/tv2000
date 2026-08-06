@@ -21,6 +21,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.security.MessageDigest
+import java.util.Locale
 
 private val Context.tv2000DataStore by preferencesDataStore(name = "tv2000")
 
@@ -75,6 +76,32 @@ class PlaybackHistoryStore(
     suspend fun saveUsbVideoDirectory(directory: String) {
         context.tv2000DataStore.edit { preferences ->
             preferences[USB_VIDEO_DIRECTORY] = directory
+        }
+    }
+
+    suspend fun directFileSnapshotRevision(
+        rootUri: String,
+        videoDirectory: String,
+    ): String? = context.tv2000DataStore.data.first()[
+        directFileSnapshotRevisionKey(rootUri, videoDirectory)
+    ]
+
+    suspend fun saveDirectFileSnapshotRevision(
+        rootUri: String,
+        videoDirectory: String,
+        sourceRevision: String,
+    ) {
+        context.tv2000DataStore.edit { preferences ->
+            preferences[directFileSnapshotRevisionKey(rootUri, videoDirectory)] = sourceRevision
+        }
+    }
+
+    suspend fun clearDirectFileSnapshotRevision(
+        rootUri: String,
+        videoDirectory: String,
+    ) {
+        context.tv2000DataStore.edit { preferences ->
+            preferences.remove(directFileSnapshotRevisionKey(rootUri, videoDirectory))
         }
     }
 
@@ -330,6 +357,19 @@ class PlaybackHistoryStore(
             }",
         )
 
+    private fun directFileSnapshotRevisionKey(
+        rootUri: String,
+        videoDirectory: String,
+    ) = stringPreferencesKey(
+        "$DIRECT_FILE_SNAPSHOT_REVISION_KEY_PREFIX${
+            sha256(
+                UsbStorageResolver.volumeIdentity(rootUri) + "\u0000" +
+                    (UsbStorageResolver.normalizeVideoDirectory(videoDirectory) ?: videoDirectory)
+                        .lowercase(Locale.ROOT),
+            )
+        }",
+    )
+
     private fun sha256(value: String): String =
         MessageDigest.getInstance("SHA-256")
             .digest(value.toByteArray(Charsets.UTF_8))
@@ -344,6 +384,7 @@ class PlaybackHistoryStore(
         val LEGACY_ACTIVE_CHANNEL = stringPreferencesKey("active_channel")
         const val HISTORY_KEY_PREFIX = "history_"
         const val ACTIVE_CHANNEL_RESOURCE_KEY_PREFIX = "active_channel_resource_"
+        const val DIRECT_FILE_SNAPSHOT_REVISION_KEY_PREFIX = "direct_file_revision_"
         const val DEFAULT_PLAYBACK_SPEED = 1.0f
         const val MIN_PLAYBACK_SPEED = 0.5f
         const val MAX_PLAYBACK_SPEED = 2.0f

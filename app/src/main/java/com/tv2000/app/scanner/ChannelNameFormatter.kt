@@ -69,6 +69,9 @@ private fun removeTechnicalSuffix(name: String): String {
 
 private fun isTechnicalToken(token: String): Boolean =
     SEASON_TOKEN.matches(token) ||
+        EPISODE_COUNT_TOKEN.matches(token) ||
+        LANGUAGE_TOKEN.matches(token) ||
+        SUBTITLE_TOKEN.matches(token) ||
         RESOLUTION_TOKEN.matches(token) ||
         SOURCE_TOKEN.matches(token) ||
         VIDEO_TOKEN.matches(token) ||
@@ -108,6 +111,15 @@ private val METADATA_FRAGMENT = Regex(
 )
 private val NAME_TOKEN = Regex("""[^\s._]+""")
 private val SEASON_TOKEN = Regex("""(?i)s\d{1,3}(?:e\d{1,3}(?:[-e]\d{1,3})?)?""")
+private val EPISODE_COUNT_TOKEN = Regex("""(?:全)?\d{1,4}(?:集|话|話)(?:全)?""")
+private val LANGUAGE_TOKEN = Regex(
+    """(?i)(?:国语|國語|粤语|粵語|普通话|普通話|国粤双语|國粵雙語|""" +
+        """国语粤语|國語粵語|mandarin|cantonese)""",
+)
+private val SUBTITLE_TOKEN = Regex(
+    """(?:简体中字|簡體中字|繁体中字|繁體中字|简繁中字|簡繁中字|""" +
+        """中英字幕|中字|简中|簡中|繁中|无字幕|無字幕)""",
+)
 private val RESOLUTION_TOKEN = Regex("""(?i)(?:\d{3,4}p|4k|8k)""")
 private val SOURCE_TOKEN = Regex(
     """(?i)(?:web-?dl|webrip|bluray|b[dr]rip|remux|hdtv|uhd|dvd-?rip)""",

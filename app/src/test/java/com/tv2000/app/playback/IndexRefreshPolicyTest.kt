@@ -32,4 +32,59 @@ class IndexRefreshPolicyTest {
 
         assertEquals(listOf(2_000L, 3_000L, 3_000L, null), delays)
     }
+
+    @Test
+    fun `MediaStore direct snapshot retries are bounded by remaining attempts`() {
+        val decisions = (2 downTo 0).map { remainingAttempts ->
+            includeDirectFileSnapshotForBackgroundScan(
+                isMediaStore = true,
+                remainingAttempts = remainingAttempts,
+            )
+        }
+
+        assertEquals(listOf(true, true, false), decisions)
+        assertEquals(
+            false,
+            includeDirectFileSnapshotForBackgroundScan(
+                isMediaStore = false,
+                remainingAttempts = 2,
+            ),
+        )
+    }
+
+    @Test
+    fun `cached MediaStore snapshot is validated only when revision changed`() {
+        assertEquals(
+            false,
+            shouldValidateCachedMediaStoreSnapshot(
+                isMediaStore = true,
+                currentSourceRevision = "generation:42",
+                validatedSourceRevision = "generation:42",
+            ),
+        )
+        assertEquals(
+            true,
+            shouldValidateCachedMediaStoreSnapshot(
+                isMediaStore = true,
+                currentSourceRevision = "generation:43",
+                validatedSourceRevision = "generation:42",
+            ),
+        )
+        assertEquals(
+            true,
+            shouldValidateCachedMediaStoreSnapshot(
+                isMediaStore = true,
+                currentSourceRevision = null,
+                validatedSourceRevision = "generation:42",
+            ),
+        )
+        assertEquals(
+            false,
+            shouldValidateCachedMediaStoreSnapshot(
+                isMediaStore = false,
+                currentSourceRevision = null,
+                validatedSourceRevision = null,
+            ),
+        )
+    }
 }

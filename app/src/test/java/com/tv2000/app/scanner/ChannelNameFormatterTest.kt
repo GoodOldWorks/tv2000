@@ -24,6 +24,18 @@ class ChannelNameFormatterTest {
     }
 
     @Test
+    fun `removes Chinese episode language and subtitle metadata`() {
+        assertEquals(
+            "三国演义",
+            displayChannelName("三国演义.1994.全84集.国语.简体中字"),
+        )
+        assertEquals(
+            "倚天屠龙记",
+            displayChannelName("倚天屠龙记.2003.简繁中字"),
+        )
+    }
+
+    @Test
     fun `extracts the title block from a bracketed release name`() {
         assertEquals(
             "Spy x Family Code White",
@@ -55,5 +67,6 @@ class ChannelNameFormatterTest {
         assertEquals("A.B.C", displayChannelName("A.B.C"))
         assertEquals("1984", displayChannelName("1984"))
         assertEquals("[1984]", displayChannelName("[1984]"))
+        assertEquals("国语", displayChannelName("国语"))
     }
 }

@@ -349,6 +349,38 @@ class RoomPersistenceTest {
     }
 
     @Test
+    fun directFileSnapshotRevisionIsScopedToVolumeAndDirectory() = runBlocking {
+        val suffix = System.nanoTime().toString()
+        val disk = "tv2000-mediastore://AAAA-$suffix"
+        val remountedDisk = "$disk?fallbackPath=%2Fmnt%2Fmedia_rw%2FAAAA-$suffix"
+        val otherDisk = "tv2000-mediastore://BBBB-$suffix"
+        val historyStore = PlaybackHistoryStore(context, database)
+
+        historyStore.saveDirectFileSnapshotRevision(
+            rootUri = disk,
+            videoDirectory = "TV2000",
+            sourceRevision = "generation:42",
+        )
+
+        assertEquals(
+            "generation:42",
+            PlaybackHistoryStore(context, database).directFileSnapshotRevision(
+                rootUri = disk,
+                videoDirectory = "TV2000",
+            ),
+        )
+        assertEquals(
+            "generation:42",
+            historyStore.directFileSnapshotRevision(remountedDisk, "tv2000"),
+        )
+        assertEquals(null, historyStore.directFileSnapshotRevision(disk, "其他目录"))
+        assertEquals(null, historyStore.directFileSnapshotRevision(otherDisk, "TV2000"))
+
+        historyStore.clearDirectFileSnapshotRevision(remountedDisk, "tv2000")
+        assertEquals(null, historyStore.directFileSnapshotRevision(disk, "TV2000"))
+    }
+
+    @Test
     fun resetAppDataClearsCatalogPlaybackAndResourceSettings() = runBlocking {
         val rootUri = Uri.parse("file:///storage/usb-reset")
         val channel = catalogRepository.replaceSnapshot(

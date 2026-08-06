@@ -138,7 +138,12 @@ class PlaybackCoordinator(
         }.getOrDefault(emptyList())
         if (indexedChannels.isNotEmpty() && canResumeFromIndex(indexedChannels)) {
             showChannelsAndTune(indexedChannels, restoringApp)
-            scheduleBackgroundScan(rootUri)
+            val refreshPlan = cachedIndexRefreshPlan(rootUri)
+            scheduleBackgroundScan(
+                rootUri = rootUri,
+                initialSourceRevision = refreshPlan.sourceRevision,
+                directFileSnapshotAttempts = refreshPlan.directFileSnapshotAttempts,
+            )
             return true
         }
 
@@ -259,6 +264,10 @@ class PlaybackCoordinator(
             mutableState.value.scanFailure == ScanFailure.USB_REMOVED
 
     private suspend fun activateMountedUsbRoot(rootUri: String) {
+        historyStore.clearDirectFileSnapshotRevision(
+            rootUri = rootUri,
+            videoDirectory = configuredUsbVideoDirectory,
+        )
         configuredUsbRootUri = rootUri
         historyStore.saveUsbRootUri(rootUri)
         activateResource(
@@ -640,7 +649,8 @@ class PlaybackCoordinator(
             is ScanResult.Success -> {
                 val channels = runCatching {
                     if (UsbStorageResolver.isMediaStoreRoot(rootUri) &&
-                        !authoritativeMediaStoreSnapshot
+                        !authoritativeMediaStoreSnapshot &&
+                        !result.isAuthoritative
                     ) {
                         catalogRepository.mergeSnapshot(rootUri, result.channels)
                     } else {
@@ -653,6 +663,7 @@ class PlaybackCoordinator(
                     )
                     return true
                 }
+                recordDirectFileSnapshotRevision(rootUri, result)
 
                 if (channels.isEmpty()) {
                     mutableState.value = freshState(AppMode.NO_CONTENT)
@@ -660,6 +671,8 @@ class PlaybackCoordinator(
                         rootUri = rootUri,
                         initialSourceRevision = result.sourceRevision,
                         initialChannels = result.channels,
+                        directFileSnapshotAttempts =
+                            directFileSnapshotRetryAttempts(result),
                     )
                     return true
                 }
@@ -669,6 +682,7 @@ class PlaybackCoordinator(
                     rootUri = rootUri,
                     initialSourceRevision = result.sourceRevision,
                     initialChannels = result.channels,
+                    directFileSnapshotAttempts = directFileSnapshotRetryAttempts(result),
                 )
                 true
             }
@@ -702,7 +716,10 @@ class PlaybackCoordinator(
                         scanFailure = result.reason,
                         scanDiagnostic = result.diagnostic,
                     )
-                    scheduleUsbMountSettlingScans(rootUri)
+                    scheduleUsbMountSettlingScans(
+                        rootUri = rootUri,
+                        directFileSnapshotAttempts = DIRECT_FILE_SNAPSHOT_RETRY_ATTEMPTS,
+                    )
                     true
                 }
             }
@@ -778,6 +795,7 @@ class PlaybackCoordinator(
         rootUri: Uri,
         initialSourceRevision: String? = null,
         initialChannels: List<ScannedChannel>? = null,
+        directFileSnapshotAttempts: Int = 0,
     ) {
         if (!SmbMediaUri.isSmb(rootUri)) {
             scheduleBackgroundScan(
@@ -785,6 +803,7 @@ class PlaybackCoordinator(
                 firstDelayMs = USB_INITIAL_RESCAN_DELAY_MS,
                 initialSourceRevision = initialSourceRevision,
                 initialChannels = initialChannels,
+                directFileSnapshotAttempts = directFileSnapshotAttempts,
             )
         }
     }
@@ -795,6 +814,7 @@ class PlaybackCoordinator(
         initialSourceRevision: String? = null,
         initialChannels: List<ScannedChannel>? = null,
         authoritativeMediaStoreSnapshot: Boolean = false,
+        directFileSnapshotAttempts: Int = 0,
     ) {
         backgroundScanJob?.cancel()
         backgroundScanJob = scope.launch {
@@ -804,6 +824,7 @@ class PlaybackCoordinator(
             var knownSourceRevision = initialSourceRevision
             var previousChannels = initialChannels
             var replaceMissing = authoritativeMediaStoreSnapshot
+            var remainingDirectFileSnapshotAttempts = directFileSnapshotAttempts
             while (isActive) {
                 val waitMs = if (isSmb) {
                     firstDelayMs.takeIf { attempt == 0 } ?: break
@@ -816,8 +837,13 @@ class PlaybackCoordinator(
                 }
                 if (waitMs > 0L) delay(waitMs)
 
+                val includeDirectFileSnapshot = includeDirectFileSnapshotForBackgroundScan(
+                    isMediaStore = isMediaStore,
+                    remainingAttempts = remainingDirectFileSnapshotAttempts,
+                )
                 if (isMediaStore &&
                     !replaceMissing &&
+                    !includeDirectFileSnapshot &&
                     knownSourceRevision != null &&
                     scanner.mediaStoreRevision(context, rootUri) == knownSourceRevision
                 ) {
@@ -829,10 +855,15 @@ class PlaybackCoordinator(
                     context = context,
                     rootUri = rootUri,
                     usbVideoDirectory = configuredUsbVideoDirectory,
+                    includeDirectFileSnapshot = includeDirectFileSnapshot,
                 )
+                if (includeDirectFileSnapshot) {
+                    remainingDirectFileSnapshotAttempts -= 1
+                }
                 if (!isSelectedResource(rootUri)) return@launch
 
-                val scannedChannels = when (scanResult) {
+                var authoritativeSnapshot = replaceMissing
+                val successfulScan = when (scanResult) {
                     is ScanResult.Failure -> {
                         if (isSmb) {
                             showBackgroundScanFailure(rootUri, scanResult)
@@ -844,9 +875,15 @@ class PlaybackCoordinator(
 
                     is ScanResult.Success -> {
                         knownSourceRevision = scanResult.sourceRevision
-                        scanResult.channels
+                        authoritativeSnapshot = authoritativeSnapshot ||
+                            scanResult.isAuthoritative
+                        if (scanResult.isAuthoritative) {
+                            remainingDirectFileSnapshotAttempts = 0
+                        }
+                        scanResult
                     }
                 }
+                val scannedChannels = successfulScan.channels
 
                 if (scannedChannels.isEmpty()) {
                     if (isSmb) {
@@ -856,10 +893,11 @@ class PlaybackCoordinator(
                         showBackgroundNoContent(rootUri)
                         return@launch
                     }
-                    if (replaceMissing) {
-                        runCatching {
+                    if (authoritativeSnapshot) {
+                        val stored = runCatching {
                             catalogRepository.replaceSnapshot(rootUri, emptyList())
-                        }
+                        }.isSuccess
+                        if (stored) recordDirectFileSnapshotRevision(rootUri, successfulScan)
                         showBackgroundNoContent(rootUri)
                         replaceMissing = false
                     }
@@ -868,14 +906,14 @@ class PlaybackCoordinator(
                     continue
                 }
 
-                if (!replaceMissing && scannedChannels == previousChannels) {
+                if (!authoritativeSnapshot && scannedChannels == previousChannels) {
                     attempt += 1
                     continue
                 }
                 previousChannels = scannedChannels
 
                 val refreshedChannels = runCatching {
-                    if (isMediaStore && !replaceMissing) {
+                    if (isMediaStore && !authoritativeSnapshot) {
                         catalogRepository.mergeSnapshot(rootUri, scannedChannels)
                     } else {
                         catalogRepository.replaceSnapshot(rootUri, scannedChannels)
@@ -886,10 +924,57 @@ class PlaybackCoordinator(
                     continue
                 }
 
+                recordDirectFileSnapshotRevision(rootUri, successfulScan)
                 applyBackgroundRefresh(rootUri, refreshedChannels)
                 replaceMissing = false
                 attempt += 1
             }
+        }
+    }
+
+    private suspend fun cachedIndexRefreshPlan(rootUri: Uri): CachedIndexRefreshPlan {
+        val isMediaStore = UsbStorageResolver.isMediaStoreRoot(rootUri)
+        val currentSourceRevision = scanner.mediaStoreRevision(context, rootUri)
+        val validatedSourceRevision = if (isMediaStore) {
+            historyStore.directFileSnapshotRevision(
+                rootUri = rootUri.toString(),
+                videoDirectory = configuredUsbVideoDirectory,
+            )
+        } else {
+            null
+        }
+        val directFileSnapshotAttempts = if (
+            shouldValidateCachedMediaStoreSnapshot(
+                isMediaStore = isMediaStore,
+                currentSourceRevision = currentSourceRevision,
+                validatedSourceRevision = validatedSourceRevision,
+            )
+        ) {
+            DIRECT_FILE_SNAPSHOT_RETRY_ATTEMPTS
+        } else {
+            0
+        }
+        return CachedIndexRefreshPlan(
+            sourceRevision = currentSourceRevision,
+            directFileSnapshotAttempts = directFileSnapshotAttempts,
+        )
+    }
+
+    private fun directFileSnapshotRetryAttempts(result: ScanResult.Success): Int =
+        if (result.isAuthoritative) 0 else DIRECT_FILE_SNAPSHOT_RETRY_ATTEMPTS
+
+    private suspend fun recordDirectFileSnapshotRevision(
+        rootUri: Uri,
+        result: ScanResult.Success,
+    ) {
+        if (!UsbStorageResolver.isMediaStoreRoot(rootUri) || !result.isAuthoritative) return
+        val sourceRevision = result.sourceRevision ?: return
+        runCatching {
+            historyStore.saveDirectFileSnapshotRevision(
+                rootUri = rootUri.toString(),
+                videoDirectory = configuredUsbVideoDirectory,
+                sourceRevision = sourceRevision,
+            )
         }
     }
 
@@ -1886,6 +1971,11 @@ class PlaybackCoordinator(
         val wasPlaying: Boolean,
     )
 
+    private data class CachedIndexRefreshPlan(
+        val sourceRevision: String?,
+        val directFileSnapshotAttempts: Int,
+    )
+
     companion object {
         const val CHANNEL_OVERLAY_DURATION_MS = 2_000L
         const val HISTORY_SAVE_INTERVAL_MS = 5_000L
@@ -1896,6 +1986,7 @@ class PlaybackCoordinator(
         const val PREVIOUS_EPISODE_POSITION_THRESHOLD_MS = 5_000L
         const val BACK_EXIT_PROMPT_DURATION_MS = 3_000L
         const val USB_INITIAL_RESCAN_DELAY_MS = 2_000L
+        const val DIRECT_FILE_SNAPSHOT_RETRY_ATTEMPTS = 2
         const val USB_RESOURCE_ID = "usb"
     }
 }
