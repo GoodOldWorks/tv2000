@@ -551,10 +551,23 @@ class PlaybackCoordinator(
         val current = mutableState.value
         if (current.mode != AppMode.READY) return
 
-        mutableState.value = current.copy(
-            currentEpisodeIndex = player.currentMediaItemIndex.coerceAtLeast(0),
-            channelOverlayPositionMs = 0L,
-            message = null,
+        mutableState.value = current.syncPlaybackPosition(
+            mediaItemIndex = player.currentMediaItemIndex,
+            positionMs = player.currentPosition,
+        ).copy(message = null)
+    }
+
+    override fun onPositionDiscontinuity(
+        oldPosition: Player.PositionInfo,
+        newPosition: Player.PositionInfo,
+        reason: Int,
+    ) {
+        val current = mutableState.value
+        if (current.mode != AppMode.READY) return
+
+        mutableState.value = current.syncPlaybackPosition(
+            mediaItemIndex = newPosition.mediaItemIndex,
+            positionMs = newPosition.positionMs,
         )
     }
 

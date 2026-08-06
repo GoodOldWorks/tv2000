@@ -1,6 +1,8 @@
 package com.tv2000.app.ui
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PlaybackTimeFormatterTest {
@@ -22,5 +24,17 @@ class PlaybackTimeFormatterTest {
     @Test
     fun `negative positions are clamped`() {
         assertEquals("00:00", formatPlaybackTime(-1L))
+    }
+
+    @Test
+    fun `visible channel overlay enables TV repaint compatibility`() {
+        assertTrue(
+            needsSoftwareOverlayRendering(
+                com.tv2000.app.playback.Tv2000UiState(channelOverlayVisible = true),
+            ),
+        )
+        assertFalse(
+            needsSoftwareOverlayRendering(com.tv2000.app.playback.Tv2000UiState()),
+        )
     }
 }

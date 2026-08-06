@@ -50,12 +50,7 @@ fun Tv2000App(
     state: Tv2000UiState,
 ) {
     ComposeRenderingCompatibility(
-        enabled = state.channelListVisible ||
-            state.mainMenuVisible ||
-            state.resourceSettingsVisible ||
-            state.usbResourceActionsVisible ||
-            state.smbResourceActionsVisible ||
-            state.advancedSettingsVisible,
+        enabled = needsSoftwareOverlayRendering(state),
     )
 
     MaterialTheme {
@@ -119,6 +114,15 @@ fun Tv2000App(
     }
 }
 
+internal fun needsSoftwareOverlayRendering(state: Tv2000UiState): Boolean =
+    state.channelOverlayVisible ||
+        state.channelListVisible ||
+        state.mainMenuVisible ||
+        state.resourceSettingsVisible ||
+        state.usbResourceActionsVisible ||
+        state.smbResourceActionsVisible ||
+        state.advancedSettingsVisible
+
 @Composable
 private fun StartupStatus(scanning: Boolean) {
     Box(
@@ -148,8 +152,9 @@ private fun StartupStatus(scanning: Boolean) {
 
 @Composable
 private fun ComposeRenderingCompatibility(enabled: Boolean) {
-    // Some TV GPUs do not invalidate selection highlights reliably in hardware. This
-    // Compose view is a sibling above PlayerView, so its software layer cannot black out video.
+    // Some TV GPUs do not invalidate changing text and selection highlights reliably in
+    // hardware. This Compose view is a sibling above PlayerView, so software rendering here
+    // cannot change or replace the video Surface.
     val overlayView = LocalView.current
     DisposableEffect(overlayView, enabled) {
         overlayView.setLayerType(

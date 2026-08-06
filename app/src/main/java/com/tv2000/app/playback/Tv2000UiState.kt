@@ -39,6 +39,14 @@ data class Tv2000UiState(
         get() = currentChannel?.episodes?.getOrNull(currentEpisodeIndex)?.title
 }
 
+internal fun Tv2000UiState.syncPlaybackPosition(
+    mediaItemIndex: Int,
+    positionMs: Long,
+): Tv2000UiState = copy(
+    currentEpisodeIndex = mediaItemIndex.takeIf { it >= 0 } ?: currentEpisodeIndex,
+    channelOverlayPositionMs = positionMs.coerceAtLeast(0L),
+)
+
 enum class AppMode {
     LOADING,
     NEEDS_STORAGE_ACCESS,
