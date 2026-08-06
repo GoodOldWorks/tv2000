@@ -4,12 +4,21 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to publish
+        required: true
+        type: string
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -19,6 +28,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Set up Java
         uses: actions/setup-java@v5
@@ -56,12 +67,12 @@ jobs:
       - name: Verify release metadata
         run: |
           metadata=app/build/outputs/apk/release/output-metadata.json
-          expected_version="${GITHUB_REF_NAME#v}"
+          expected_version="${RELEASE_TAG#v}"
           actual_version="$(jq -r '.elements[0].versionName' "$metadata")"
           apk_file="$(jq -r '.elements[0].outputFile' "$metadata")"
 
           if [ "$actual_version" != "$expected_version" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match app version $actual_version"
+            echo "::error::Tag $RELEASE_TAG does not match app version $actual_version"
             exit 1
           fi
 
@@ -79,9 +90,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
+          gh release create "$RELEASE_TAG" \
             dist/TV2000.apk \
             dist/TV2000.apk.sha256 \
             --verify-tag \
             --generate-notes \
-            --title "TV2000 $GITHUB_REF_NAME"
+            --title "TV2000 $RELEASE_TAG"
