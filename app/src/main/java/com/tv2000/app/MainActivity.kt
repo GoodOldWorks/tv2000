@@ -237,19 +237,20 @@ class MainActivity : ComponentActivity() {
 
     private fun initializePlaybackAfterFirstDraw() {
         var handled = false
-        rootView.viewTreeObserver.addOnDrawListener(
-            object : ViewTreeObserver.OnDrawListener {
-                override fun onDraw() {
-                    if (handled) return
+        rootView.viewTreeObserver.addOnPreDrawListener(
+            object : ViewTreeObserver.OnPreDrawListener {
+                override fun onPreDraw(): Boolean {
+                    if (handled) return true
                     handled = true
                     val firstFrameElapsedMs = SystemClock.elapsedRealtime()
                     rootView.post {
                         if (rootView.viewTreeObserver.isAlive) {
-                            rootView.viewTreeObserver.removeOnDrawListener(this)
+                            rootView.viewTreeObserver.removeOnPreDrawListener(this)
                         }
                         logStartupTimestamp(APP_CONTENT_FIRST_FRAME, firstFrameElapsedMs)
                         initializePlayback()
                     }
+                    return true
                 }
             },
         )
@@ -257,17 +258,18 @@ class MainActivity : ComponentActivity() {
 
     private fun removeStartupViewAfterFirstOverlayDraw(overlayView: View) {
         var handled = false
-        overlayView.viewTreeObserver.addOnDrawListener(
-            object : ViewTreeObserver.OnDrawListener {
-                override fun onDraw() {
-                    if (handled) return
+        overlayView.viewTreeObserver.addOnPreDrawListener(
+            object : ViewTreeObserver.OnPreDrawListener {
+                override fun onPreDraw(): Boolean {
+                    if (handled) return true
                     handled = true
                     overlayView.post {
                         if (overlayView.viewTreeObserver.isAlive) {
-                            overlayView.viewTreeObserver.removeOnDrawListener(this)
+                            overlayView.viewTreeObserver.removeOnPreDrawListener(this)
                         }
                         rootView.removeView(startupView)
                     }
+                    return true
                 }
             },
         )
@@ -400,7 +402,7 @@ class MainActivity : ComponentActivity() {
             this,
             mediaMountReceiver,
             filter,
-            ContextCompat.RECEIVER_NOT_EXPORTED,
+            ContextCompat.RECEIVER_EXPORTED,
         )
         mediaReceiverRegistered = true
     }
@@ -443,7 +445,7 @@ class MainActivity : ComponentActivity() {
     private fun openStoragePicker() {
         if (storagePickerOpen || isFinishing) return
 
-        val mountedUsbRoot = UsbStorageResolver.findMountedUsbRoot(this)
+        val mountedUsbRoot = UsbStorageResolver.findMountedUsbRootCandidate(this)
         if (mountedUsbRoot != null) {
             val permission = UsbStorageResolver.requiredReadPermission()
             if (checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) {

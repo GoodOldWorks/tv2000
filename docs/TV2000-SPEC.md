@@ -9,7 +9,7 @@
 | 规格版本 | v1.0 |
 | 对应 PRD | TV2000 PRD v1.0 |
 | 文档状态 | Draft for Implementation |
-| 目标平台 | Android TV 9+（API 28+） |
+| 目标平台 | Android TV 6.0+（API 23+） |
 | 默认语言 | 简体中文；所有用户可见文案须支持本地化 |
 
 配套文档：[TV2000 MVP 开发与测试计划](./TV2000-MVP-DEVELOPMENT-TEST-PLAN.md)
@@ -1289,6 +1289,7 @@ v1 应提供仅本地可用的结构化诊断事件：
 
 ### 22.1 Android 版本
 
+- Android TV 6.0 / API 23，覆盖厂商旧版 U 盘挂载与运行时权限实现；
 - Android TV 9 / API 28；
 - Android TV 10；
 - Android TV 11；
@@ -1347,7 +1348,7 @@ v1 发布前必须满足：
 - 500 次连续切台测试通过；
 - 100 次插拔恢复测试通过；
 - 参考设备性能指标达到第 19.1 节目标；
-- Android 9 和当前发布目标版本各至少一台真机通过；
+- Android 6.0 / API 23 和当前发布目标版本各至少一台真机通过；
 - 所有用户可见文案已本地化；
 - 无账号、广告、推荐或文件浏览入口；
 - Room schema migration 测试通过；

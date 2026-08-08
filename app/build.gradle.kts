@@ -15,7 +15,7 @@ android {
 
     defaultConfig {
         applicationId = "com.tv2000.app"
-        minSdk = 28
+        minSdk = 23
         targetSdk = 37
         versionCode = 4
         versionName = "0.2.2"
@@ -57,6 +57,10 @@ android {
         buildConfig = true
     }
 
+    compileOptions {
+        isCoreLibraryDesugaringEnabled = true
+    }
+
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
@@ -69,6 +73,8 @@ android {
 }
 
 dependencies {
+    coreLibraryDesugaring(libs.desugar.jdk.libs)
+
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.lifecycle.runtime.compose)

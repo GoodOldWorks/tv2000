@@ -64,16 +64,16 @@ Android Studio 自带 JetBrains Runtime，可作为 Android 构建 JDK；项目�
 
 从 Android Studio 的 `Tools > SDK Manager` 安装：
 
-- Android SDK Platform 28；
+- Android SDK Platform 23；
 - Android SDK Platform 37，作为当前 compile/target 基线；
 - Android SDK Build-Tools；
 - Android SDK Platform-Tools；
 - Android SDK Command-line Tools（latest）；
 - Android Emulator；
-- Android TV API 28 ARM64 系统镜像（SDK Manager 提供时）；
+- Android TV API 23 ARM64 系统镜像（SDK Manager 提供时）；
 - Android TV 或 Google TV API 37 ARM64 系统镜像。
 
-Apple Silicon 应优先选择 `ARM 64 v8a` 系统镜像。如果 SDK Manager 不提供 API 28 的 ARM64 TV 镜像，不要下载 x86 镜像强行作为主环境；最低 API 28 应改用真机或 CI 验证，本地模拟器使用可获得的最低 ARM64 TV 镜像。
+Apple Silicon 应优先选择 `ARM 64 v8a` 系统镜像。如果 SDK Manager 不提供 API 23 的 ARM64 TV 镜像，不要下载 x86 镜像强行作为主环境；最低 API 23 应改用真机或 CI 验证，本地模拟器使用可获得的最低 ARM64 TV 镜像。
 
 暂时不需要安装：
 
@@ -116,14 +116,14 @@ Android 工程创建后，应保证以下命令在干净 checkout 上可运行�
 1. 打开 `Tools > Device Manager`；
 2. 选择 `Create Virtual Device`；
 3. 选择 Android TV 设备配置；
-4. 创建 `TV2000_API_28`；
+4. 创建 `TV2000_API_23`；
 5. 创建 `TV2000_CURRENT`，系统版本与项目 target API 对应；
 6. 两个 AVD 均启用硬件图形加速；
 7. 分别启动一次，完成系统初始化。
 
 两个模拟器的用途：
 
-- `TV2000_API_28`：最低系统兼容；
+- `TV2000_API_23`：最低系统兼容，重点覆盖旧版 U 盘挂载和运行时权限；
 - `TV2000_CURRENT`：新权限、SAF 和生命周期兼容。
 
 模拟器序列号可通过以下命令查看：
@@ -863,7 +863,7 @@ Android 工程初始化完成后，按以下顺序建立测试闭环：
 
 1. 先写自然排序单元测试；
 2. 建立 Fake StorageProvider；
-3. 在 `TV2000_API_28` 推送三个频道测试数据；
+3. 在 `TV2000_API_23` 推送三个频道测试数据；
 4. 让 Debug 构建识别 `/Download/TV2000-Test`；
 5. 播放一个 H.264 MP4；
 6. 用 ADB keyevent 完成上下切台；

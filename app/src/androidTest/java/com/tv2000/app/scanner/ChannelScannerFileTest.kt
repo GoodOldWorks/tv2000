@@ -2,6 +2,7 @@ package com.tv2000.app.scanner
 
 import android.content.Context
 import android.net.Uri
+import android.system.Os
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.filters.SdkSuppress
@@ -36,6 +37,34 @@ class ChannelScannerFileTest {
                 listOf("2", "10"),
                 channels.first().episodes.map { it.title },
             )
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun fileFallbackDoesNotFollowSymbolicLinks() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val root = File(context.cacheDir, "channel-scanner-links-${System.nanoTime()}")
+        try {
+            val realVideo = File(root, "TV2000/频道1/001.mp4").apply {
+                parentFile?.mkdirs()
+                writeBytes(byteArrayOf(1))
+            }
+            Os.symlink(
+                realVideo.absolutePath,
+                File(realVideo.parentFile, "002.mp4").absolutePath,
+            )
+            Os.symlink(
+                realVideo.parentFile!!.absolutePath,
+                File(root, "TV2000/频道2").absolutePath,
+            )
+
+            val result = ChannelScanner().scan(context, Uri.fromFile(root))
+            val success = result as ScanResult.Success
+
+            assertEquals(listOf("频道1"), success.channels.map { it.name })
+            assertEquals(listOf("001"), success.channels.single().episodes.map { it.title })
         } finally {
             root.deleteRecursively()
         }

@@ -3,6 +3,7 @@ package com.tv2000.app.playback
 import android.content.Context
 import android.net.Uri
 import android.os.SystemClock
+import android.util.Log
 import android.view.KeyEvent
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
@@ -55,6 +56,7 @@ class PlaybackCoordinator(
     private var tuneJob: Job? = null
     private var backgroundScanJob: Job? = null
     private var settingsJob: Job? = null
+    private var smbPlaybackRecoveryJob: Job? = null
     private var backExitPromptJob: Job? = null
     private var pendingLeftPressJob: Job? = null
     private var pendingRightPressJob: Job? = null
@@ -74,6 +76,7 @@ class PlaybackCoordinator(
     private val historyWriteMutex = Mutex()
     private val usbSwapMutex = Mutex()
     private val backgroundResumeState = BackgroundPlaybackResumeState()
+    private val smbPlaybackRecoveryState = SmbPlaybackRecoveryState()
     private val doublePressDetector = DirectionalDoublePressDetector(
         timeoutMs = DIRECTIONAL_DOUBLE_PRESS_TIMEOUT_MS,
     )
@@ -378,6 +381,7 @@ class PlaybackCoordinator(
             runCatching { smbClient.validate(resource) }.exceptionOrNull()
         } ?: return null
         val failure = classifySmbFailure(validationError)
+        Log.e(SMB_LOG_TAG, "SMB validation failed: ${failure.diagnostic}", validationError)
         return AddSmbResourceResult.Failure(
             context.getString(R.string.smb_validation_failed, failure.diagnostic),
         )
@@ -495,8 +499,12 @@ class PlaybackCoordinator(
             KeyEvent.KEYCODE_ENTER,
             KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
             -> {
-                if (player.isPlaying) player.pause() else player.play()
-                showChannelOverlay()
+                if (smbPlaybackRecoveryState.consumeManualRetry()) {
+                    retryCurrentSmbPlayback()
+                } else {
+                    if (player.isPlaying) player.pause() else player.play()
+                    showChannelOverlay()
+                }
                 RemoteResult.CONSUMED
             }
 
@@ -536,6 +544,7 @@ class PlaybackCoordinator(
         tuneJob?.cancel()
         backgroundScanJob?.cancel()
         settingsJob?.cancel()
+        smbPlaybackRecoveryJob?.cancel()
         backExitPromptJob?.cancel()
         player.removeListener(this)
         player.release()
@@ -581,6 +590,11 @@ class PlaybackCoordinator(
     }
 
     override fun onPlaybackStateChanged(playbackState: Int) {
+        if (playbackState == Player.STATE_READY &&
+            smbPlaybackRecoveryState.onPlaybackReady()
+        ) {
+            mutableState.value = mutableState.value.copy(message = null)
+        }
         if (playbackState == Player.STATE_ENDED) {
             mutableState.value = mutableState.value.copy(
                 message = "本频道节目已播放完毕",
@@ -607,6 +621,8 @@ class PlaybackCoordinator(
         val current = mutableState.value
         val channel = current.currentChannel ?: return
         if (player.currentMediaItem?.localConfiguration?.uri?.let(SmbMediaUri::isSmb) == true) {
+            Log.e(SMB_LOG_TAG, "SMB playback failed", error)
+            smbPlaybackRecoveryState.onPlaybackFailure()
             mutableState.value = current.copy(
                 message = context.getString(R.string.smb_resource_unavailable),
                 channelOverlayVisible = true,
@@ -1689,6 +1705,8 @@ class PlaybackCoordinator(
 
     private suspend fun tuneTo(channelIndex: Int, restoringApp: Boolean) {
         val channel = mutableState.value.channels.getOrNull(channelIndex) ?: return
+        smbPlaybackRecoveryJob?.cancel()
+        smbPlaybackRecoveryState.onPlaybackReady()
         val history = historyStore.channelPlayback(
             channelId = channel.id,
             legacyChannelId = channel.legacyId,
@@ -1725,6 +1743,28 @@ class PlaybackCoordinator(
             message = null,
         )
         scheduleOverlayDismiss()
+    }
+
+    private fun retryCurrentSmbPlayback() {
+        if (smbPlaybackRecoveryJob?.isActive == true) return
+        val mediaItemIndex = player.currentMediaItemIndex.takeIf { it >= 0 } ?: 0
+        val positionMs = player.currentPosition.coerceAtLeast(0L)
+        val resource = configuredSmbResources.firstOrNull { resource ->
+            resource.id == activeResourceId
+        }
+        mutableState.value = mutableState.value.copy(
+            message = context.getString(R.string.smb_reconnecting),
+            channelOverlayVisible = true,
+        )
+        smbPlaybackRecoveryJob = scope.launch {
+            withContext(Dispatchers.IO) {
+                resource?.let(smbClient::invalidateConnections)
+            }
+            if (!isActive) return@launch
+            player.seekTo(mediaItemIndex, positionMs)
+            player.prepare()
+            player.play()
+        }
     }
 
     private fun mediaItemsFor(channel: Channel): List<MediaItem> =
@@ -1988,6 +2028,30 @@ class PlaybackCoordinator(
         const val USB_INITIAL_RESCAN_DELAY_MS = 2_000L
         const val DIRECT_FILE_SNAPSHOT_RETRY_ATTEMPTS = 2
         const val USB_RESOURCE_ID = "usb"
+    }
+}
+
+private const val SMB_LOG_TAG = "TV2000-SMB"
+
+internal class SmbPlaybackRecoveryState {
+    private var phase = Phase.IDLE
+
+    fun onPlaybackFailure() {
+        phase = Phase.FAILED
+    }
+
+    fun onPlaybackReady(): Boolean = (phase != Phase.IDLE).also {
+        phase = Phase.IDLE
+    }
+
+    fun consumeManualRetry(): Boolean = (phase == Phase.FAILED).also { accepted ->
+        if (accepted) phase = Phase.RETRYING
+    }
+
+    private enum class Phase {
+        IDLE,
+        FAILED,
+        RETRYING,
     }
 }
 

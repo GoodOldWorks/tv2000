@@ -35,7 +35,7 @@ class SmbjMediaClient : Closeable {
     private val compatibilityClientConfig = lazy {
         createClientConfig(ntlmIntegrity = false)
     }
-    private val compatibilityAuthenticationKeys = ConcurrentHashMap.newKeySet<String>()
+    private val compatibilityAuthenticationKeys = ConcurrentHashMap<String, Boolean>()
     private val connectionLock = Any()
     private val sharedConnections = mutableMapOf<SharedConnectionKey, SharedConnection>()
     private val channelScanExecutor = lazy {
@@ -143,6 +143,15 @@ class SmbjMediaClient : Closeable {
         withCompatibleConfig(resource) { config ->
             open(resource, relativePath, config)
         }
+
+    fun invalidateConnections(resource: SmbResource) {
+        val staleConnections = synchronized(connectionLock) {
+            sharedConnections.keys
+                .filter { key -> key.matches(resource) }
+                .mapNotNull { key -> sharedConnections.remove(key) }
+        }
+        staleConnections.distinct().forEach(SharedConnection::close)
+    }
 
     private fun open(
         resource: SmbResource,
@@ -256,7 +265,7 @@ class SmbjMediaClient : Closeable {
         block: (SmbConfig) -> T,
     ): T {
         val key = resource.authenticationCompatibilityKey()
-        if (key in compatibilityAuthenticationKeys) {
+        if (compatibilityAuthenticationKeys.containsKey(key)) {
             return block(compatibilityClientConfig.value)
         }
 
@@ -265,7 +274,7 @@ class SmbjMediaClient : Closeable {
         } catch (error: Exception) {
             if (!shouldRetryWithoutNtlmIntegrity(error)) throw error
             block(compatibilityClientConfig.value).also {
-                compatibilityAuthenticationKeys += key
+                compatibilityAuthenticationKeys[key] = true
             }
         }
     }
@@ -296,7 +305,15 @@ private data class SharedConnectionKey(
     val password: String,
     val domain: String,
     val compatibilityMode: Boolean,
-)
+) {
+    fun matches(resource: SmbResource): Boolean =
+        host == resource.host.lowercase() &&
+            port == resource.port &&
+            share == resource.share.lowercase() &&
+            username == resource.username &&
+            password == resource.password &&
+            domain == resource.domain
+}
 
 private class SharedConnection(
     private val client: SMBClient,

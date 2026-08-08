@@ -6,8 +6,9 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.os.storage.StorageManager
-import android.os.storage.StorageVolume
 import android.provider.MediaStore
+import android.util.Log
+import androidx.annotation.RequiresApi
 import java.io.File
 import java.net.URI
 import java.net.URLDecoder
@@ -25,11 +26,18 @@ object UsbStorageResolver {
         }
 
     fun findMountedUsbRoots(context: Context): List<Uri> {
+        return findMountedUsbRoots(context, requireReadAccess = true)
+    }
+
+    fun findMountedUsbRootCandidate(context: Context): Uri? =
+        findMountedUsbRoots(context, requireReadAccess = false).singleOrNull()
+
+    private fun findMountedUsbRoots(
+        context: Context,
+        requireReadAccess: Boolean,
+    ): List<Uri> {
         val storageManager = context.getSystemService(StorageManager::class.java)
-        val removableVolumes = storageManager.storageVolumes
-            .filter { volume ->
-                volume.isRemovable && volume.state == Environment.MEDIA_MOUNTED
-            }
+        val removableVolumes = mountedRemovableVolumes(storageManager)
 
         if (removableVolumes.isEmpty()) return emptyList()
 
@@ -42,7 +50,7 @@ object UsbStorageResolver {
         }
 
         return removableVolumes.mapNotNull { volume ->
-            val fallbackDirectory = volumeDirectoryCompat(volume)
+            val fallbackDirectory = volume.directory
                 ?.takeIf { directory -> directory.isDirectory }
             findMediaStoreVolumeName(
                 removableVolume = volume,
@@ -53,8 +61,14 @@ object UsbStorageResolver {
                     volumeName = volumeName,
                     fallbackPath = fallbackDirectory?.absolutePath,
                 )
-            } ?: fallbackDirectory
-                ?.takeIf(File::canRead)
+            } ?: volume.directory
+                ?.takeIf { directory ->
+                    shouldExposeMountedFileRoot(
+                        isDirectory = directory.isDirectory,
+                        isReadable = directory.canRead(),
+                        requireReadAccess = requireReadAccess,
+                    )
+                }
                 ?.let(Uri::fromFile)
         }.distinctBy(::volumeIdentity)
     }
@@ -151,19 +165,17 @@ object UsbStorageResolver {
             .build()
 
     private fun findMediaStoreVolumeName(
-        removableVolume: StorageVolume,
+        removableVolume: MountedStorageVolume,
         mediaStoreVolumes: List<String>,
         allowSingleFallback: Boolean,
     ): String? {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            removableVolume.mediaStoreVolumeName
-                ?.let { volumeName ->
-                    mediaStoreVolumes.firstOrNull {
-                        it.equals(volumeName, ignoreCase = true)
-                    }
+        removableVolume.mediaStoreVolumeName
+            ?.let { volumeName ->
+                mediaStoreVolumes.firstOrNull {
+                    it.equals(volumeName, ignoreCase = true)
                 }
-                ?.let { return it }
-        }
+            }
+            ?.let { return it }
 
         removableVolume.uuid?.let { uuid ->
             mediaStoreVolumes.firstOrNull { volumeName ->
@@ -176,19 +188,151 @@ object UsbStorageResolver {
     private fun uuidIdentity(value: String): String =
         "uuid:${value.lowercase(Locale.ROOT)}"
 
-    @Suppress("DEPRECATION")
-    private fun volumeDirectoryCompat(volume: StorageVolume): File? {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            return volume.directory
+    private fun mountedRemovableVolumes(
+        storageManager: StorageManager,
+    ): List<MountedStorageVolume> =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            Api24StorageVolumes.mountedRemovableVolumes(storageManager)
+        } else {
+            legacyMountedRemovableVolumes(storageManager)
         }
 
-        return runCatching {
+    private fun legacyMountedRemovableVolumes(
+        storageManager: StorageManager,
+    ): List<MountedStorageVolume> {
+        val pathVolumes = legacyMountedVolumePaths(storageManager)
+        Log.i(TAG, "legacy_path_mounted_removable_count=${pathVolumes.size}")
+        if (pathVolumes.isNotEmpty()) return pathVolumes
+
+        val volumeResult = runCatching {
+            storageManager.javaClass.getMethod("getVolumeList").invoke(storageManager)
+        }.onFailure { error ->
+            Log.w(TAG, "legacy getVolumeList unavailable: ${error.javaClass.simpleName}")
+        }
+        val volumes = volumeResult.getOrNull() as? Array<*> ?: return emptyList()
+
+        return volumes.filterNotNull().mapNotNull { volume ->
+            val isRemovable = invokeNoArg(volume, "isRemovable") as? Boolean
+                ?: return@mapNotNull null
+            if (!isRemovable) return@mapNotNull null
+
+            val directory = reflectedVolumeDirectory(volume)
+                ?: return@mapNotNull null
+            val state = invokeNoArg(volume, "getState") as? String
+                ?: runCatching { Environment.getExternalStorageState(directory) }.getOrNull()
+            if (state != Environment.MEDIA_MOUNTED) return@mapNotNull null
+
+            MountedStorageVolume(
+                uuid = invokeNoArg(volume, "getUuid") as? String,
+                directory = directory,
+            )
+        }
+    }
+
+    private fun legacyMountedVolumePaths(
+        storageManager: StorageManager,
+    ): List<MountedStorageVolume> {
+        val volumePathsResult = runCatching {
+            storageManager.javaClass.getMethod("getVolumePaths").invoke(storageManager)
+        }.onFailure { error ->
+            Log.w(TAG, "legacy getVolumePaths unavailable: ${error.javaClass.simpleName}")
+        }
+        val volumePaths = volumePathsResult.getOrNull() as? Array<*> ?: return emptyList()
+        val primaryPath = runCatching {
+            Environment.getExternalStorageDirectory().canonicalPath
+        }.getOrNull()
+
+        return volumePaths.filterIsInstance<String>().mapNotNull { path ->
+            val directory = File(path)
+            val canonicalPath = runCatching { directory.canonicalPath }.getOrNull()
+                ?: return@mapNotNull null
+            if (canonicalPath == primaryPath || !directory.isDirectory) {
+                return@mapNotNull null
+            }
+            val isRemovable = runCatching {
+                Environment.isExternalStorageRemovable(directory)
+            }.getOrDefault(true)
+            if (!isRemovable) return@mapNotNull null
+
+            val state = invokeWithString(
+                receiver = storageManager,
+                methodName = "getVolumeState",
+                value = canonicalPath,
+            ) as? String ?: runCatching {
+                Environment.getExternalStorageState(directory)
+            }.getOrNull()
+            Log.i(TAG, "legacy_volume_candidate removable=$isRemovable state=$state")
+            if (state != Environment.MEDIA_MOUNTED) return@mapNotNull null
+
+            MountedStorageVolume(
+                uuid = null,
+                directory = directory,
+            )
+        }
+    }
+
+    private fun reflectedVolumeDirectory(volume: Any): File? =
+        runCatching {
             volume.javaClass.getMethod("getPathFile").invoke(volume) as? File
         }.getOrNull() ?: runCatching {
             val path = volume.javaClass.getMethod("getPath").invoke(volume) as? String
             path?.let(::File)
         }.getOrNull()
+
+    private fun invokeNoArg(receiver: Any, methodName: String): Any? =
+        runCatching {
+            receiver.javaClass.getMethod(methodName).invoke(receiver)
+        }.getOrNull()
+
+    private fun invokeWithString(
+        receiver: Any,
+        methodName: String,
+        value: String,
+    ): Any? = runCatching {
+        receiver.javaClass.getMethod(methodName, String::class.java).invoke(receiver, value)
+    }.getOrNull()
+
+    @RequiresApi(Build.VERSION_CODES.N)
+    private object Api24StorageVolumes {
+        fun mountedRemovableVolumes(
+            storageManager: StorageManager,
+        ): List<MountedStorageVolume> = storageManager.storageVolumes
+            .asSequence()
+            .filter { volume ->
+                volume.isRemovable && volume.state == Environment.MEDIA_MOUNTED
+            }
+            .map { volume ->
+                MountedStorageVolume(
+                    uuid = volume.uuid,
+                    directory = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        volume.directory
+                    } else {
+                        reflectedVolumeDirectory(volume)
+                    },
+                    mediaStoreVolumeName = if (
+                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+                    ) {
+                        volume.mediaStoreVolumeName
+                    } else {
+                        null
+                    },
+                )
+            }
+            .toList()
     }
 
     private const val FALLBACK_PATH_QUERY = "fallbackPath"
+    private const val TAG = "TV2000.Usb"
 }
+
+private data class MountedStorageVolume(
+    val uuid: String?,
+    val directory: File?,
+    val mediaStoreVolumeName: String? = null,
+)
+
+internal fun shouldExposeMountedFileRoot(
+    isDirectory: Boolean,
+    isReadable: Boolean,
+    requireReadAccess: Boolean,
+): Boolean = isDirectory && (!requireReadAccess || isReadable)

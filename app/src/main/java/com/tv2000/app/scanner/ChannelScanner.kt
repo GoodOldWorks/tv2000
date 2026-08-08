@@ -6,6 +6,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.SystemClock
 import android.provider.MediaStore
+import android.system.Os
+import android.system.OsConstants
 import android.util.Log
 import androidx.documentfile.provider.DocumentFile
 import com.tv2000.app.model.ScannedChannel
@@ -18,9 +20,6 @@ import com.tv2000.app.smb.classifySmbFailure
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.nio.file.Files
-import java.nio.file.LinkOption
-import java.nio.file.attribute.BasicFileAttributes
 
 class ChannelScanner(
     private val smbClient: SmbjMediaClient? = null,
@@ -44,7 +43,7 @@ class ChannelScanner(
                 )
             } catch (error: Exception) {
                 val failure = classifySmbFailure(error)
-                Log.e(TAG, "SMB scan failed: ${failure.diagnostic}")
+                Log.e(TAG, "SMB scan failed: ${failure.diagnostic}", error)
                 ScanResult.Failure(
                     reason = failure.reason,
                     diagnostic = failure.diagnostic,
@@ -197,7 +196,7 @@ class ChannelScanner(
                 }
                 val attributes = readAttributes(file)
                     ?: return FileChannelScan.Failure
-                if (!attributes.isRegularFile || attributes.size() <= 0L) {
+                if (!attributes.isRegularFile || attributes.sizeBytes <= 0L) {
                     return@forEach
                 }
                 add(
@@ -208,8 +207,8 @@ class ChannelScanner(
                             missingDelimiterValue = file.name,
                         ),
                         uri = Uri.fromFile(file),
-                        sizeBytes = attributes.size(),
-                        modifiedAt = attributes.lastModifiedTime().toMillis(),
+                        sizeBytes = attributes.sizeBytes,
+                        modifiedAt = attributes.modifiedAtMillis,
                     ),
                 )
             }
@@ -227,11 +226,13 @@ class ChannelScanner(
         )
     }
 
-    private fun readAttributes(file: File): BasicFileAttributes? = runCatching {
-        Files.readAttributes(
-            file.toPath(),
-            BasicFileAttributes::class.java,
-            LinkOption.NOFOLLOW_LINKS,
+    private fun readAttributes(file: File): FileSystemEntryAttributes? = runCatching {
+        val stat = Os.lstat(file.absolutePath)
+        FileSystemEntryAttributes(
+            isDirectory = OsConstants.S_ISDIR(stat.st_mode),
+            isRegularFile = OsConstants.S_ISREG(stat.st_mode),
+            sizeBytes = stat.st_size,
+            modifiedAtMillis = stat.st_mtime * MILLIS_PER_SECOND,
         )
     }.getOrNull()
 
@@ -468,6 +469,13 @@ class ChannelScanner(
     }
 }
 
+private data class FileSystemEntryAttributes(
+    val isDirectory: Boolean,
+    val isRegularFile: Boolean,
+    val sizeBytes: Long,
+    val modifiedAtMillis: Long,
+)
+
 private sealed interface FileChannelScan {
     data object Empty : FileChannelScan
     data object Failure : FileChannelScan
@@ -499,3 +507,4 @@ enum class ScanFailure {
 
 private const val TAG = "TV2000-SMB"
 private const val SCAN_TAG = "TV2000.Scan"
+private const val MILLIS_PER_SECOND = 1_000L

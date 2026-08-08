@@ -52,4 +52,28 @@ class UsbStorageResolverTest {
             UsbStorageResolver.volumeIdentity("tv2000-mediastore://EF56-7890"),
         )
     }
+
+    @Test
+    fun `unreadable mounted directory remains visible as a permission candidate`() {
+        assertEquals(
+            true,
+            shouldExposeMountedFileRoot(
+                isDirectory = true,
+                isReadable = false,
+                requireReadAccess = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `unreadable mounted directory is excluded from playable roots`() {
+        assertEquals(
+            false,
+            shouldExposeMountedFileRoot(
+                isDirectory = true,
+                isReadable = false,
+                requireReadAccess = true,
+            ),
+        )
+    }
 }

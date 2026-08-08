@@ -11,8 +11,11 @@ import androidx.media3.datasource.DataSourceException
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.TransferListener
+import com.hierynomus.protocol.transport.TransportException
 import java.io.EOFException
 import java.io.IOException
+import java.net.SocketException
+import java.net.SocketTimeoutException
 
 @OptIn(UnstableApi::class)
 class Tv2000DataSource private constructor(
@@ -78,6 +81,7 @@ private class SmbDataSource(
 ) : BaseDataSource(false) {
     private var openedUri: Uri? = null
     private var openedFile: SmbOpenFile? = null
+    private var openedResource: SmbResource? = null
     private var readPosition = 0L
     private var bytesRemaining = 0L
     private var opened = false
@@ -89,7 +93,14 @@ private class SmbDataSource(
             ?: throw IOException("SMB resource is not configured")
         val relativePath = SmbMediaUri.relativePath(dataSpec.uri)
             ?: throw IOException("Invalid TV2000 SMB URI")
-        val file = smbClient.open(resource, relativePath)
+        val file = try {
+            smbClient.open(resource, relativePath)
+        } catch (error: Exception) {
+            if (isRetryableSmbTransportFailure(error)) {
+                smbClient.invalidateConnections(resource)
+            }
+            throw error.asSmbIOException("SMB open failed")
+        }
         if (dataSpec.position > file.length) {
             file.close()
             throw DataSourceException(DataSourceException.POSITION_OUT_OF_RANGE)
@@ -97,6 +108,7 @@ private class SmbDataSource(
 
         openedUri = dataSpec.uri
         openedFile = file
+        openedResource = resource
         readBuffer.reset()
         readPosition = dataSpec.position
         bytesRemaining = if (dataSpec.length == C.LENGTH_UNSET.toLong()) {
@@ -114,14 +126,21 @@ private class SmbDataSource(
         if (bytesRemaining == 0L) return C.RESULT_END_OF_INPUT
         val requestedLength = minOf(length.toLong(), bytesRemaining).toInt()
         val file = openedFile ?: throw IOException("SMB file is not open")
-        val bytesRead = readBuffer.read(
-            position = readPosition,
-            destination = buffer,
-            destinationOffset = offset,
-            requestedLength = requestedLength,
-            availableLength = bytesRemaining,
-            source = RandomAccessSource(file::read),
-        )
+        val bytesRead = try {
+            readBuffer.read(
+                position = readPosition,
+                destination = buffer,
+                destinationOffset = offset,
+                requestedLength = requestedLength,
+                availableLength = bytesRemaining,
+                source = RandomAccessSource(file::read),
+            )
+        } catch (error: Exception) {
+            if (isRetryableSmbTransportFailure(error)) {
+                openedResource?.let(smbClient::invalidateConnections)
+            }
+            throw error.asSmbIOException("SMB read failed")
+        }
         if (bytesRead < 0) {
             throw EOFException("SMB file ended before the advertised length")
         }
@@ -141,6 +160,7 @@ private class SmbDataSource(
         openedUri = null
         openedFile?.close()
         openedFile = null
+        openedResource = null
         readBuffer.reset()
         if (opened) {
             opened = false
@@ -155,3 +175,20 @@ private class SmbDataSource(
         override fun createDataSource(): DataSource = SmbDataSource(smbClient, resourceProvider)
     }
 }
+
+internal fun isRetryableSmbTransportFailure(error: Throwable): Boolean {
+    val causes = generateSequence(error) { cause ->
+        cause.cause.takeUnless { it === cause }
+    }.take(MAX_SMB_CAUSE_DEPTH).toList()
+    if (causes.any { cause -> cause is InterruptedException }) return false
+    return causes.any { cause ->
+        cause is SocketTimeoutException ||
+            cause is SocketException ||
+            cause is TransportException
+    }
+}
+
+private fun Exception.asSmbIOException(message: String): IOException =
+    this as? IOException ?: IOException(message, this)
+
+private const val MAX_SMB_CAUSE_DEPTH = 12
