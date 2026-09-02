@@ -1,6 +1,10 @@
-# TV2000
+<p align="center">
+  <img src="docs/images/tv2000-icon.png" alt="TV2000 应用图标" width="160">
+</p>
 
-> Turn digital videos back into television.
+<h1 align="center">TV2000</h1>
+
+<p align="center"><em>Turn digital videos back into television.</em></p>
 
 TV2000 是一个为 Android TV 设计的本地视频频道播放器。它把 U 盘或 SMB 资源中的一级目录变成频道：打开应用直接续播，按遥控器上下键切台，不必每次从文件管理器里挑选视频。
 
