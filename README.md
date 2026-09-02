@@ -4,7 +4,7 @@
 
 TV2000 是一个为 Android TV 设计的本地视频频道播放器。它把 U 盘或 SMB 资源中的一级目录变成频道：打开应用直接续播，按遥控器上下键切台，不必每次从文件管理器里挑选视频。
 
-[下载最新 APK](https://github.com/quechao20/tv2000/releases/latest/download/TV2000.apk) · [查看 Releases](https://github.com/quechao20/tv2000/releases) · [校验文件](https://github.com/quechao20/tv2000/releases/latest/download/TV2000.apk.sha256)
+[下载最新 APK](https://github.com/GoodOldWorks/tv2000/releases/latest/download/TV2000.apk) · [查看 Releases](https://github.com/GoodOldWorks/tv2000/releases) · [校验文件](https://github.com/GoodOldWorks/tv2000/releases/latest/download/TV2000.apk.sha256)
 
 > TV2000 不提供或内置任何影视内容，仅用于播放用户自己的媒体文件。
 
@@ -68,7 +68,7 @@ smb://192.168.1.10/共享名/可选目录
 
 ## 安装
 
-从 [Releases](https://github.com/quechao20/tv2000/releases) 下载 `TV2000.apk`，通过 U 盘安装，或使用 ADB：
+从 [Releases](https://github.com/GoodOldWorks/tv2000/releases) 下载 `TV2000.apk`，通过 U 盘安装，或使用 ADB：
 
 ```bash
 adb install -r TV2000.apk
@@ -99,3 +99,9 @@ export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
 - [产品与技术规格](docs/TV2000-SPEC.md)
 - [MVP 开发与测试计划](docs/TV2000-MVP-DEVELOPMENT-TEST-PLAN.md)
 - [本地测试指南](docs/TV2000-LOCAL-TESTING.md)
+
+## 许可与名称使用
+
+本项目源代码采用 [Apache License 2.0](LICENSE) 授权，允许使用、修改和分发。分发时须遵守许可证并保留 [NOTICE](NOTICE) 中的原项目归属信息。
+
+Apache License 2.0 不授予原项目名称和品牌的使用权。公开分发修改版本或衍生版本时，必须更换“TV2000”名称及相关品牌标识，不得冒充官方版本，并按 [名称与品牌使用规则](TRADEMARKS.md) 明确说明原项目名称、作者和项目地址。
